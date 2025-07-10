@@ -1,97 +1,99 @@
 #!/bin/bash
 
-echo "=============================="
-echo "   Parham RTT Tunnel Script"
-echo "=============================="
-echo
+echo "========================================"
+echo "      Parham RTT Tunnel Installer"
+echo "========================================"
+echo ""
+
 echo "Select server type:"
 echo "1) Iran (Client)"
 echo "2) Foreign (Server)"
-read -p "Enter choice [1 or 2]: " server_type
+read -rp "Enter choice [1 or 2]: " server_type
 
-read -p "Enter Token (or leave empty to generate one): " token
-if [ -z "$token" ]; then
-  token=$(openssl rand -hex 12)
-  echo "Generated Token: $token"
+read -rp "Enter Token (or leave empty to auto-generate): " token
+token=${token:-$(head -c 12 /dev/urandom | xxd -p)}
+
+read -rp "Enter SNI (e.g. www.cloudflare.com): " sni
+if [[ -z "$sni" ]]; then
+  echo "❌ SNI is required!"
+  exit 1
 fi
 
-read -p "Enter SNI (e.g. www.cloudflare.com): " sni
-[ -z "$sni" ] && sni="www.cloudflare.com"
-
-if [ "$server_type" = "1" ]; then
-  read -p "Enter IPv4 of foreign server: " foreign_ip
+if [[ "$server_type" == "1" ]]; then
+  read -rp "Enter IPv4 of foreign server (outside Iran): " foreign_ip
+  if [[ -z "$foreign_ip" ]]; then
+    echo "❌ Foreign server IP is required for client mode!"
+    exit 1
+  fi
 fi
 
-# Default ports
-ports=(443 8081 23902)
-
-# Download RTT binary
-echo "[*] Downloading RTT..."
-wget -qO rtt https://github.com/Red5d/rtunnel/releases/latest/download/rtunnel-linux-amd64
+echo -e "\n🔽 Downloading RTT binary..."
+mkdir -p /opt/rtt && cd /opt/rtt || exit
+wget -q https://github.com/aymanbagabas/go-rtorrent/releases/latest/download/rtt-linux-amd64 -O rtt
 chmod +x rtt
-mv rtt /usr/local/bin/rtt
+install -m 755 rtt /usr/local/bin/rtt
 
-# Create config file
+echo "✅ RTT installed successfully."
+
+echo -e "\n🛠 Creating config file..."
 mkdir -p /etc/parham-rtt
-config_file="/etc/parham-rtt/config.json"
 
-if [ "$server_type" = "1" ]; then
-  cat > "$config_file" <<EOF
+if [[ "$server_type" == "1" ]]; then
+  cat <<EOF > /etc/parham-rtt/config.json
 {
-  "role": "client",
-  "token": "$token",
+  "mode": "client",
   "server": "$foreign_ip",
   "sni": "$sni",
-  "tunnels": {
+  "token": "$token"
+}
 EOF
-
-  for port in "${ports[@]}"; do
-    echo "    \"$port\": {\"listen\": \"127.0.0.1:$port\"}," >> "$config_file"
-  done
-
-  sed -i '$ s/,$//' "$config_file" # remove last comma
-  echo "  }" >> "$config_file"
-  echo "}" >> "$config_file"
-
 else
-  cat > "$config_file" <<EOF
+  cat <<EOF > /etc/parham-rtt/config.json
 {
-  "role": "server",
-  "token": "$token",
-  "tunnels": {
+  "mode": "server",
+  "sni": "$sni",
+  "token": "$token"
+}
 EOF
-
-  for port in "${ports[@]}"; do
-    echo "    \"$port\": {\"listen\": \":$port\"}," >> "$config_file"
-  done
-
-  sed -i '$ s/,$//' "$config_file"
-  echo "  }" >> "$config_file"
-  echo "}" >> "$config_file"
 fi
 
-# Systemd service
-cat > /etc/systemd/system/parham-rtt.service <<EOF
+echo -e "\n🧩 Creating systemd service..."
+cat <<EOF > /etc/systemd/system/parham-rtt.service
 [Unit]
 Description=Parham RTT Tunnel Service
 After=network.target
 
 [Service]
 ExecStart=/usr/local/bin/rtt -config /etc/parham-rtt/config.json
-Restart=always
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=1048576
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
+echo -e "\n🔄 Enabling and starting service..."
 systemctl daemon-reexec
 systemctl daemon-reload
 systemctl enable parham-rtt
-systemctl restart parham-rtt
+systemctl start parham-rtt
 
-echo
-echo "✅ RTT tunnel installed and started successfully!"
-echo "Token: $token"
-echo
-echo "To check status: systemctl status parham-rtt"
-echo "To remove: bash <(curl -fsSL https://raw.githubusercontent.com/parhampahlevann/rtt-fix-parham-pahlevan/main/uninstall.sh)"
+sleep 1
+status=$(systemctl is-active parham-rtt)
+
+echo ""
+if [[ "$status" == "active" ]]; then
+  echo "✅ RTT tunnel started successfully!"
+  echo "Token: $token"
+else
+  echo "❌ Failed to start RTT. Use: journalctl -u parham-rtt -e"
+fi
+
+echo ""
+echo "📌 Check status:    systemctl status parham-rtt"
+echo "📌 View logs:       journalctl -u parham-rtt -f"
+echo "📌 Remove:          bash <(curl -fsSL https://raw.githubusercontent.com/parhampahlevann/rtt-fix-parham-pahlevan/main/uninstall.sh)"
