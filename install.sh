@@ -4,10 +4,10 @@ set -e
 
 echo "🔧 Installing ReverseTlsTunnel (Optimized Version)..."
 
-# Dependencies
+# 1. Install dependencies
 sudo apt update -y && sudo apt install -y curl wget unzip socat jq systemd
 
-# Paths
+# 2. Paths
 INSTALL_DIR="/opt/reversetlstunnel"
 BIN_URL="https://github.com/radkesvat/ReverseTlsTunnel/releases/latest/download/rtt-linux-amd64.zip"
 BIN_NAME="rtt"
@@ -15,20 +15,34 @@ SERVICE_NAME="rtt"
 SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
 CONFIG_FILE="$INSTALL_DIR/config.env"
 
-# Create install directory
+# 3. Prepare directory
 sudo mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
 
-# Download RTT binary
+# 4. Download RTT binary
 echo "⬇️ Downloading RTT binary..."
-wget -q "$BIN_URL" -O rtt.zip
-unzip -o rtt.zip
+wget -q "$BIN_URL" -O rtt.zip || { echo "❌ Failed to download RTT binary"; exit 1; }
+
+unzip -o rtt.zip || { echo "❌ Failed to unzip RTT binary"; exit 1; }
+
+# 5. Ensure binary is valid and executable
+if [[ ! -f "$BIN_NAME" ]]; then
+  echo "❌ RTT binary not found after unzip."
+  exit 1
+fi
+
 chmod +x "$BIN_NAME"
 
-# Create config file
-echo "⚙️ Generating config.env..."
+# 6. Validate binary format
+BIN_TYPE=$(file "$BIN_NAME")
+if ! echo "$BIN_TYPE" | grep -q "ELF 64-bit"; then
+  echo "❌ Invalid RTT binary format: $BIN_TYPE"
+  exit 1
+fi
+
+# 7. Create config file
+echo "⚙️ Creating config.env..."
 cat <<EOF | sudo tee "$CONFIG_FILE" > /dev/null
-# === RTT CONFIG ===
 REMOTE_HOST=your.server.ip
 REMOTE_PORT=443
 LOCAL_PORT=22
@@ -37,7 +51,7 @@ RECONNECT_DELAY=5
 MAX_RETRIES=0
 EOF
 
-# Create systemd service
+# 8. Create systemd service
 echo "⚙️ Creating systemd service..."
 cat <<EOF | sudo tee "$SERVICE_FILE" > /dev/null
 [Unit]
@@ -60,14 +74,13 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
-# Enable & start service
-echo "🔄 Enabling and starting service..."
+# 9. Enable & start service
 sudo systemctl daemon-reexec
 sudo systemctl daemon-reload
 sudo systemctl enable "$SERVICE_NAME"
 sudo systemctl restart "$SERVICE_NAME"
 
-# Done
-echo -e "\n✅ ReverseTlsTunnel installed and running as a service!"
-echo "👉 Config file: $CONFIG_FILE"
-echo "🔄 To restart: sudo systemctl restart $SERVICE_NAME"
+# 10. Done!
+echo -e "\n✅ ReverseTlsTunnel installed and running!"
+echo "👉 Config: $CONFIG_FILE"
+echo "🔄 Restart: sudo systemctl restart $SERVICE_NAME"
