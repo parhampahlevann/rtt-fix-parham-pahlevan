@@ -1,34 +1,33 @@
 #!/bin/bash
 
-PROJECT_DIR="ReverseTlsTunnel-Optimized"
-mkdir -p "$PROJECT_DIR"
-cd "$PROJECT_DIR" || exit 1
-
-# Create install.sh
-cat <<'EOF' > install.sh
-#!/bin/bash
-
 set -e
 
 echo "🔧 Installing ReverseTlsTunnel (Optimized Version)..."
 
+# Dependencies
 sudo apt update -y && sudo apt install -y curl wget unzip socat jq systemd
 
+# Paths
 INSTALL_DIR="/opt/reversetlstunnel"
 BIN_URL="https://github.com/radkesvat/ReverseTlsTunnel/releases/latest/download/rtt-linux-amd64.zip"
 BIN_NAME="rtt"
-SERVICE_FILE="/etc/systemd/system/rtt.service"
+SERVICE_NAME="rtt"
+SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
 CONFIG_FILE="$INSTALL_DIR/config.env"
 
+# Create install directory
 sudo mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
 
+# Download RTT binary
 echo "⬇️ Downloading RTT binary..."
 wget -q "$BIN_URL" -O rtt.zip
 unzip -o rtt.zip
 chmod +x "$BIN_NAME"
 
-cat <<EOF_INNER | sudo tee "$CONFIG_FILE" > /dev/null
+# Create config file
+echo "⚙️ Generating config.env..."
+cat <<EOF | sudo tee "$CONFIG_FILE" > /dev/null
 # === RTT CONFIG ===
 REMOTE_HOST=your.server.ip
 REMOTE_PORT=443
@@ -36,10 +35,11 @@ LOCAL_PORT=22
 USE_COMPRESSION=true
 RECONNECT_DELAY=5
 MAX_RETRIES=0
-EOF_INNER
+EOF
 
-echo "⚙️ Setting up systemd service..."
-cat <<EOF_SERVICE | sudo tee "$SERVICE_FILE" > /dev/null
+# Create systemd service
+echo "⚙️ Creating systemd service..."
+cat <<EOF | sudo tee "$SERVICE_FILE" > /dev/null
 [Unit]
 Description=Reverse TLS Tunnel Service (Optimized)
 After=network-online.target
@@ -58,35 +58,16 @@ RestartSec=3
 
 [Install]
 WantedBy=multi-user.target
-EOF_SERVICE
+EOF
 
+# Enable & start service
+echo "🔄 Enabling and starting service..."
 sudo systemctl daemon-reexec
 sudo systemctl daemon-reload
-sudo systemctl enable rtt
-sudo systemctl start rtt
+sudo systemctl enable "$SERVICE_NAME"
+sudo systemctl restart "$SERVICE_NAME"
 
+# Done
 echo -e "\n✅ ReverseTlsTunnel installed and running as a service!"
-echo "👉 You can edit your config here: $CONFIG_FILE"
-echo "🔄 To restart service after changes: sudo systemctl restart rtt"
-EOF
-
-chmod +x install.sh
-
-# Create README.md
-cat <<EOF > README.md
-# ReverseTlsTunnel - Optimized Installer
-
-## ⚡ Quick Install
-
-\`\`\`bash
-bash <(curl -sSL https://raw.githubusercontent.com/YOUR_USERNAME/ReverseTlsTunnel-Optimized/main/install.sh)
-\`\`\`
-
-## Features
-- Low traffic, stable reconnect
-- Ubuntu 20.04/22.04 ready
-- Systemd service
-- Configurable via \`config.env\`
-EOF
-
-echo "✅ Done. You can now upload to GitHub."
+echo "👉 Config file: $CONFIG_FILE"
+echo "🔄 To restart: sudo systemctl restart $SERVICE_NAME"
