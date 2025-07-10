@@ -1,7 +1,7 @@
 #!/bin/bash
 
 function install_rtt() {
-  echo "🚀 در حال نصب RTT..."
+  echo "🚀 Installing RTT..."
 
   apt update -y
   apt install curl wget unzip -y
@@ -41,42 +41,42 @@ EOF
   systemctl enable rtt
   systemctl restart rtt
 
-  echo "✅ نصب RTT با موفقیت انجام شد!"
+  echo "✅ RTT installed successfully!"
 }
 
 function install_xui() {
-  echo "🔧 در حال نصب پنل X-UI..."
+  echo "🔧 Installing X-UI panel..."
   bash <(curl -Ls https://raw.githubusercontent.com/vaxilu/x-ui/master/install.sh)
-  echo "✅ X-UI نصب شد. آدرس پنل: http://IP:54321"
+  echo "✅ X-UI installation completed. Panel: http://<your_ip>:54321"
 }
 
 function restart_rtt() {
-  echo "♻️ در حال ریستارت RTT..."
+  echo "♻️ Restarting RTT service..."
   systemctl restart rtt
-  echo "✅ سرویس RTT ریستارت شد."
+  echo "✅ RTT service restarted."
 }
 
 function show_menu() {
   echo "========================================="
-  echo "  🎯 اسکریپت نصب RTT - Parham Pahlevan"
+  echo "     RTT Setup Script by Parham Pahlevan"
   echo "========================================="
-  echo "1) نصب RTT (با پورت 443, 8081, 23902)"
-  echo "2) نصب پنل X-UI"
-  echo "3) ریستارت سرویس RTT"
-  echo "4) خروج"
+  echo "1) Install RTT (multi-port: 443, 8081, 23902)"
+  echo "2) Install X-UI Panel"
+  echo "3) Restart RTT Service"
+  echo "4) Exit"
   echo
-  read -p "👉 گزینه مورد نظر را انتخاب کنید [1-4]: " choice
+  read -p "👉 Enter your choice [1-4]: " choice
 
   case $choice in
     1) install_rtt ;;
     2) install_xui ;;
     3) restart_rtt ;;
-    4) echo "خروج..."; exit 0 ;;
-    *) echo "❌ گزینه نامعتبر."; sleep 1; show_menu ;;
+    4) echo "Exiting..."; exit 0 ;;
+    *) echo "❌ Invalid option."; sleep 1; show_menu ;;
   esac
 }
 
-# شروع اجرای منو
+# Start Menu Loop
 while true; do
   clear
   show_menu
