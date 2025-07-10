@@ -1,107 +1,141 @@
 #!/bin/bash
 
-echo -e "\e[96m=============================="
-echo -e " Parham RTT Tunnel Script"
-echo -e "==============================\e[0m"
+set -e
 
-echo -e "\nSelect an option:"
-echo "1) Install as Iran Client"
-echo "2) Install as Foreign Server"
-echo "3) Uninstall RTT Tunnel"
-read -p "Enter your choice [1-3]: " CHOICE
+echo -e "\n\033[1;36m========== Parham RTT Tunnel Script ==========\033[0m\n"
 
-if [[ "$CHOICE" == "3" ]]; then
-  echo "🚫 Uninstalling ParhamTunnel (RTT)..."
-  systemctl stop parham-rtt
-  systemctl disable parham-rtt
-  rm -f /etc/systemd/system/parham-rtt.service
-  rm -f /usr/local/bin/rtt
-  rm -rf /etc/parham-rtt
-  systemctl daemon-reload
-  echo "✅ RTT successfully uninstalled from the system."
-  exit 0
-fi
+function uninstall() {
+    echo -e "\n🔧 Uninstalling RTT Service..."
+    systemctl stop parham-rtt 2>/dev/null || true
+    systemctl disable parham-rtt 2>/dev/null || true
+    rm -f /etc/systemd/system/parham-rtt.service
+    rm -rf /etc/parham-rtt
+    rm -f /usr/local/bin/rtt
+    echo -e "✅ RTT completely removed.\n"
+    exit 0
+}
 
-# شناسایی معماری
-ARCH=$(uname -m)
-case "$ARCH" in
-  x86_64) ARCH_DL="amd64" ;;
-  aarch64) ARCH_DL="arm64" ;;
-  armv7l|armhf) ARCH_DL="arm" ;;
-  *) echo "❌ Unsupported architecture: $ARCH"; exit 1 ;;
-esac
+function check_port_443() {
+    if ss -tuln | grep -q ':443'; then
+        echo -e "\n❌ Port 443 is already in use! Please stop the conflicting service and try again."
+        exit 1
+    fi
+}
 
-read -p "Enter Token (or leave empty to auto-generate): " TOKEN
-if [[ -z "$TOKEN" ]]; then
-  TOKEN=$(cat /dev/urandom | tr -dc A-Za-z0-9 | head -c 10)
-fi
+function detect_arch() {
+    ARCH=$(uname -m)
+    case "$ARCH" in
+        x86_64) echo "amd64" ;;
+        aarch64) echo "arm64" ;;
+        armv7l) echo "arm" ;;
+        *) echo "unsupported" ;;
+    esac
+}
 
-read -p "Enter SNI (default: pay.anten.ir): " SNI
-SNI=${SNI:-pay.anten.ir}
+function download_rtt_binary() {
+    ARCH=$(detect_arch)
+    if [[ "$ARCH" == "unsupported" ]]; then
+        echo -e "\n❌ Unsupported architecture: $(uname -m)"
+        exit 1
+    fi
+    echo -e "\n📥 Downloading RTT binary for $ARCH..."
+    curl -L -o /usr/local/bin/rtt https://github.com/azadnetworks/ReverseTlsTunnel/releases/latest/download/rtt-linux-$ARCH
+    chmod +x /usr/local/bin/rtt
+    file /usr/local/bin/rtt | grep -qi "ELF" || { echo -e "\n❌ Failed to download valid RTT binary."; exit 1; }
+    echo -e "✅ RTT installed successfully."
+}
 
-if [[ "$CHOICE" == "1" ]]; then
-  read -p "Enter IPv4 of foreign server (outside Iran): " SERVER_IP
-fi
+function create_config() {
+    mkdir -p /etc/parham-rtt
+    echo -e "\n🔧 Creating config file..."
 
-echo -e "\n📥 Downloading RTT binary for $ARCH..."
-curl -L -o /usr/local/bin/rtt "https://github.com/trimstray/reverse-tls-tunnel/releases/latest/download/rtt_linux_${ARCH_DL}" || { echo "❌ Failed to download RTT binary"; exit 1; }
-chmod +x /usr/local/bin/rtt
+    read -p $'\nSelect server type:\n1) Iran (Client)\n2) Foreign (Server)\n\nEnter choice [1 or 2]: ' SERVER_TYPE
+    if [[ "$SERVER_TYPE" != "1" && "$SERVER_TYPE" != "2" ]]; then
+        echo "❌ Invalid choice"; exit 1
+    fi
 
-echo "✅ RTT installed successfully."
+    read -p "Enter Token (or leave empty to auto-generate): " TOKEN
+    TOKEN=${TOKEN:-$(tr -dc A-Za-z0-9 </dev/urandom | head -c 16)}
 
-CONFIG_DIR="/etc/parham-rtt"
-mkdir -p "$CONFIG_DIR"
+    read -p "Enter SNI (e.g. www.cloudflare.com) [default: pay.anten.ir]: " SNI
+    SNI=${SNI:-pay.anten.ir}
 
-if [[ "$CHOICE" == "1" ]]; then
-cat > "$CONFIG_DIR/config.json" <<EOF
+    if [[ "$SERVER_TYPE" == "1" ]]; then
+        read -p "Enter IPv4 of foreign server (outside Iran): " SERVER_IP
+        cat <<EOF > /etc/parham-rtt/config.json
 {
-  "mode": "client",
   "remote": "$SERVER_IP:443",
-  "token": "$TOKEN",
+  "key": "$TOKEN",
   "sni": "$SNI"
 }
 EOF
-else
-cat > "$CONFIG_DIR/config.json" <<EOF
+    else
+        cat <<EOF > /etc/parham-rtt/config.json
 {
-  "mode": "server",
   "listen": ":443",
-  "token": "$TOKEN"
+  "key": "$TOKEN"
 }
 EOF
-fi
+    fi
 
-echo "🔧 Creating systemd service..."
+    echo -e "✅ Config saved to /etc/parham-rtt/config.json"
+    echo -e "Token: $TOKEN"
+}
 
-cat > /etc/systemd/system/parham-rtt.service <<EOF
+function create_service() {
+    echo -e "\n🔧 Creating systemd service..."
+    cat <<EOF > /etc/systemd/system/parham-rtt.service
 [Unit]
 Description=Parham RTT Tunnel Service
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/rtt -config $CONFIG_DIR/config.json
+ExecStart=/usr/local/bin/rtt -config /etc/parham-rtt/config.json
 Restart=always
-User=root
+RestartSec=3
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reexec
-systemctl daemon-reload
-systemctl enable parham-rtt
-systemctl start parham-rtt
+    echo -e "🟦 Enabling and starting service..."
+    systemctl daemon-reexec
+    systemctl daemon-reload
+    systemctl enable parham-rtt
+    systemctl restart parham-rtt
 
-sleep 2
+    sleep 2
+    if systemctl is-active --quiet parham-rtt; then
+        echo -e "\n✅ RTT Tunnel is now running!"
+    else
+        echo -e "\n❌ Failed to start RTT. Use: journalctl -u parham-rtt -e"
+    fi
+}
 
-if systemctl is-active --quiet parham-rtt; then
-  echo -e "\n✅ RTT tunnel started successfully!"
-  echo "Token: $TOKEN"
-else
-  echo -e "\n❌ Failed to start RTT."
-  echo "🔍 To debug: journalctl -u parham-rtt -e"
-fi
+function show_menu() {
+    echo -e "\n\033[1;32m==== MENU ====\033[0m"
+    echo "1) Install RTT Tunnel"
+    echo "2) Uninstall RTT"
+    echo "0) Exit"
+    read -p "Enter choice: " CHOICE
+    case $CHOICE in
+        1)
+            check_port_443
+            download_rtt_binary
+            create_config
+            create_service
+            ;;
+        2)
+            uninstall
+            ;;
+        0)
+            exit 0
+            ;;
+        *)
+            echo "❌ Invalid option"; exit 1
+            ;;
+    esac
+}
 
-echo -e "\n📌 Status:   systemctl status parham-rtt"
-echo -e "📌 Logs:     journalctl -u parham-rtt -f"
-echo -e "🗑️  Uninstall any time: re-run this script and select option 3"
+# Run
+show_menu
