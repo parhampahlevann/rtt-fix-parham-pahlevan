@@ -1,35 +1,61 @@
 #!/bin/bash
 
-function install_rtt() {
-  echo "🚀 Installing RTT..."
+set -e
 
-  apt update -y
-  apt install curl wget unzip -y
+# === ReverseTlsTunnel Optimized Installer ===
+# Tested on: Ubuntu 20.04 & 22.04
+# Author: Parham (for public GitHub release)
+# Features: traffic optimization, systemd service, auto-reconnect
 
-  mkdir -p /opt/rtt
-  cd /opt/rtt
+echo "🔧 Installing ReverseTlsTunnel (Optimized Version)..."
 
-  wget https://github.com/radkesvat/ReverseTlsTunnel/releases/latest/download/rtt-linux-amd64.zip -O rtt.zip
-  unzip -o rtt.zip
-  chmod +x rtt
+# Update and install dependencies
+sudo apt update -y && sudo apt install -y curl wget unzip socat jq systemd
 
-  cat > /opt/rtt/config.json <<EOF
-{
-  "listen": [
-    {"local": "0.0.0.0:443", "remote": "127.0.0.1:2087"},
-    {"local": "0.0.0.0:8081", "remote": "127.0.0.1:8081"},
-    {"local": "0.0.0.0:23902", "remote": "127.0.0.1:23902"}
-  ]
-}
+# Define installation paths
+INSTALL_DIR="/opt/reversetlstunnel"
+BIN_URL="https://github.com/radkesvat/ReverseTlsTunnel/releases/latest/download/rtt-linux-amd64.zip"
+BIN_NAME="rtt"
+SERVICE_FILE="/etc/systemd/system/rtt.service"
+CONFIG_FILE="$INSTALL_DIR/config.env"
+
+# Create necessary folders
+sudo mkdir -p "$INSTALL_DIR"
+cd "$INSTALL_DIR"
+
+# Download and extract RTT binary
+echo "⬇️ Downloading RTT binary..."
+wget -q "$BIN_URL" -O rtt.zip
+unzip -o rtt.zip
+chmod +x "$BIN_NAME"
+
+# Create default config file
+cat <<EOF | sudo tee "$CONFIG_FILE" > /dev/null
+# === RTT CONFIG ===
+REMOTE_HOST=your.server.ip
+REMOTE_PORT=443
+LOCAL_PORT=22
+USE_COMPRESSION=true
+RECONNECT_DELAY=5
+MAX_RETRIES=0 # 0 = infinite
 EOF
 
-  cat > /etc/systemd/system/rtt.service <<EOF
+# Create systemd service
+echo "⚙️ Setting up systemd service..."
+cat <<EOF | sudo tee "$SERVICE_FILE" > /dev/null
 [Unit]
-Description=RTT Reverse Tunnel
-After=network.target
+Description=Reverse TLS Tunnel Service (Optimized)
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-ExecStart=/opt/rtt/rtt -config /opt/rtt/config.json
+Type=simple
+WorkingDirectory=$INSTALL_DIR
+EnvironmentFile=$CONFIG_FILE
+ExecStart=$INSTALL_DIR/$BIN_NAME client -s \$REMOTE_HOST:\$REMOTE_PORT -l 127.0.0.1:\$LOCAL_PORT \\
+  \$( [[ "\$USE_COMPRESSION" == "true" ]] && echo "-z" ) \\
+  --reconnect-delay \$RECONNECT_DELAY \\
+  --max-retries \$MAX_RETRIES
 Restart=always
 RestartSec=3
 
@@ -37,51 +63,12 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
-  systemctl daemon-reload
-  systemctl enable rtt
-  systemctl restart rtt
+# Enable & start service
+sudo systemctl daemon-reexec
+sudo systemctl daemon-reload
+sudo systemctl enable rtt
+sudo systemctl start rtt
 
-  echo "✅ RTT installed successfully!"
-}
-
-function restart_rtt() {
-  echo "♻️ Restarting RTT service..."
-  systemctl restart rtt
-  echo "✅ RTT service restarted."
-}
-
-function uninstall_rtt() {
-  echo "🗑️ Uninstalling RTT service..."
-  systemctl stop rtt
-  systemctl disable rtt
-  rm -f /etc/systemd/system/rtt.service
-  systemctl daemon-reload
-  rm -rf /opt/rtt
-  echo "✅ RTT has been completely removed."
-}
-
-function show_menu() {
-  echo "========================================="
-  echo "     RTT Setup Script by Parham Pahlevan"
-  echo "========================================="
-  echo "1) Install RTT (multi-port: 443, 8081, 23902)"
-  echo "2) Restart RTT Service"
-  echo "3) Uninstall RTT"
-  echo "4) Exit"
-  echo
-  read -p "👉 Enter your choice [1-4]: " choice
-
-  case $choice in
-    1) install_rtt ;;
-    2) restart_rtt ;;
-    3) uninstall_rtt ;;
-    4) echo "Exiting..."; exit 0 ;;
-    *) echo "❌ Invalid option."; sleep 1; show_menu ;;
-  esac
-}
-
-# Start Menu Loop
-while true; do
-  clear
-  show_menu
-done
+echo -e "\n✅ ReverseTlsTunnel installed and running as a service!"
+echo "👉 You can edit your config here: $CONFIG_FILE"
+echo "🔄 To restart service after changes: sudo systemctl restart rtt"
