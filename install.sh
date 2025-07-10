@@ -44,16 +44,20 @@ EOF
   echo "✅ RTT installed successfully!"
 }
 
-function install_xui() {
-  echo "🔧 Installing X-UI panel..."
-  bash <(curl -Ls https://raw.githubusercontent.com/vaxilu/x-ui/master/install.sh)
-  echo "✅ X-UI installation completed. Panel: http://<your_ip>:54321"
-}
-
 function restart_rtt() {
   echo "♻️ Restarting RTT service..."
   systemctl restart rtt
   echo "✅ RTT service restarted."
+}
+
+function uninstall_rtt() {
+  echo "🗑️ Uninstalling RTT service..."
+  systemctl stop rtt
+  systemctl disable rtt
+  rm -f /etc/systemd/system/rtt.service
+  systemctl daemon-reload
+  rm -rf /opt/rtt
+  echo "✅ RTT has been completely removed."
 }
 
 function show_menu() {
@@ -61,16 +65,16 @@ function show_menu() {
   echo "     RTT Setup Script by Parham Pahlevan"
   echo "========================================="
   echo "1) Install RTT (multi-port: 443, 8081, 23902)"
-  echo "2) Install X-UI Panel"
-  echo "3) Restart RTT Service"
+  echo "2) Restart RTT Service"
+  echo "3) Uninstall RTT"
   echo "4) Exit"
   echo
   read -p "👉 Enter your choice [1-4]: " choice
 
   case $choice in
     1) install_rtt ;;
-    2) install_xui ;;
-    3) restart_rtt ;;
+    2) restart_rtt ;;
+    3) uninstall_rtt ;;
     4) echo "Exiting..."; exit 0 ;;
     *) echo "❌ Invalid option."; sleep 1; show_menu ;;
   esac
