@@ -1,68 +1,97 @@
 #!/bin/bash
 
-# Author: Parham Pahlevan
-# Script: Multi-port RTT Tunnel installer + X-UI integration (optimized)
+echo "=============================="
+echo "   Parham RTT Tunnel Script"
+echo "=============================="
+echo
+echo "Select server type:"
+echo "1) Iran (Client)"
+echo "2) Foreign (Server)"
+read -p "Enter choice [1 or 2]: " server_type
 
-set -e
-
-# Root check
-if [ "$EUID" -ne 0 ]; then
-  echo "❌ لطفاً اسکریپت را با دسترسی root اجرا کنید."
-  exit 1
+read -p "Enter Token (or leave empty to generate one): " token
+if [ -z "$token" ]; then
+  token=$(openssl rand -hex 12)
+  echo "Generated Token: $token"
 fi
 
-# Ports you want RTT to listen on (6 ports now)
-PORTS=(443 8443 2096 2087 23902 8081)
+read -p "Enter SNI (e.g. www.cloudflare.com): " sni
+[ -z "$sni" ] && sni="www.cloudflare.com"
 
-# Install dependencies
-apt update -y
-apt install -y curl unzip wget git systemd net-tools
+if [ "$server_type" = "1" ]; then
+  read -p "Enter IPv4 of foreign server: " foreign_ip
+fi
 
-# Install ReverseTlsTunnel (RTT)
-INSTALL_DIR="/opt/rtt"
-RTT_REPO="https://github.com/radkesvat/ReverseTlsTunnel"
+# Default ports
+ports=(443 8081 23902)
 
-mkdir -p "$INSTALL_DIR"
-cd "$INSTALL_DIR"
-git clone "$RTT_REPO" .
-chmod +x install.sh
-./install.sh
+# Download RTT binary
+echo "[*] Downloading RTT..."
+wget -qO rtt https://github.com/Red5d/rtunnel/releases/latest/download/rtunnel-linux-amd64
+chmod +x rtt
+mv rtt /usr/local/bin/rtt
 
-# Create systemd services for each port
-for PORT in "${PORTS[@]}"; do
-  SERVICE_FILE="/etc/systemd/system/rtt-$PORT.service"
-  cat <<EOF > "$SERVICE_FILE"
+# Create config file
+mkdir -p /etc/parham-rtt
+config_file="/etc/parham-rtt/config.json"
+
+if [ "$server_type" = "1" ]; then
+  cat > "$config_file" <<EOF
+{
+  "role": "client",
+  "token": "$token",
+  "server": "$foreign_ip",
+  "sni": "$sni",
+  "tunnels": {
+EOF
+
+  for port in "${ports[@]}"; do
+    echo "    \"$port\": {\"listen\": \"127.0.0.1:$port\"}," >> "$config_file"
+  done
+
+  sed -i '$ s/,$//' "$config_file" # remove last comma
+  echo "  }" >> "$config_file"
+  echo "}" >> "$config_file"
+
+else
+  cat > "$config_file" <<EOF
+{
+  "role": "server",
+  "token": "$token",
+  "tunnels": {
+EOF
+
+  for port in "${ports[@]}"; do
+    echo "    \"$port\": {\"listen\": \":$port\"}," >> "$config_file"
+  done
+
+  sed -i '$ s/,$//' "$config_file"
+  echo "  }" >> "$config_file"
+  echo "}" >> "$config_file"
+fi
+
+# Systemd service
+cat > /etc/systemd/system/parham-rtt.service <<EOF
 [Unit]
-Description=RTT Tunnel on port $PORT
+Description=Parham RTT Tunnel Service
 After=network.target
 
 [Service]
-ExecStart=$INSTALL_DIR/rtt -mode server -listen :$PORT
+ExecStart=/usr/local/bin/rtt -config /etc/parham-rtt/config.json
 Restart=always
-User=root
-LimitNOFILE=65535
 
 [Install]
 WantedBy=multi-user.target
 EOF
-done
 
-# Reload systemd & enable services
 systemctl daemon-reexec
 systemctl daemon-reload
+systemctl enable parham-rtt
+systemctl restart parham-rtt
 
-for PORT in "${PORTS[@]}"; do
-  systemctl enable rtt-$PORT
-  systemctl restart rtt-$PORT
-  echo "✅ RTT فعال شد روی پورت: $PORT"
-done
-
-# Install x-ui panel
-bash <(curl -Ls https://raw.githubusercontent.com/vaxilu/x-ui/master/install.sh)
-
-# Result message
-clear
-echo -e "\n🎉 نصب کامل شد!"
-echo -e "🌀 پورت‌های فعال شده: ${PORTS[*]}"
-echo -e "🌐 آدرس پنل X-UI: http://<IP-سرور>:54321"
-echo -e "نام کاربری: admin | رمز عبور: admin"
+echo
+echo "✅ RTT tunnel installed and started successfully!"
+echo "Token: $token"
+echo
+echo "To check status: systemctl status parham-rtt"
+echo "To remove: bash <(curl -fsSL https://raw.githubusercontent.com/parhampahlevann/rtt-fix-parham-pahlevan/main/uninstall.sh)"
