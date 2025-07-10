@@ -1,15 +1,15 @@
 #!/bin/bash
 
-# نصب پیشنیازها
+# نصب ابزارهای لازم
 apt update -y && apt install curl wget unzip -y
 
-# دانلود RTT و خارج کردن فایل‌ها
+# ساخت مسیر و دانلود RTT
 mkdir -p /opt/rtt && cd /opt/rtt
 wget https://github.com/radkesvat/ReverseTlsTunnel/releases/latest/download/rtt-linux-amd64.zip -O rtt.zip
-unzip rtt.zip
+unzip -o rtt.zip
 chmod +x rtt
 
-# افزودن پورت‌ها: 8081 و 23902 و 443
+# تنظیمات کانفیگ چند پورت
 cat > /opt/rtt/config.json <<EOF
 {
   "listen": [
@@ -20,10 +20,10 @@ cat > /opt/rtt/config.json <<EOF
 }
 EOF
 
-# ساخت سرویس systemd
+# ساخت فایل سرویس systemd
 cat > /etc/systemd/system/rtt.service <<EOF
 [Unit]
-Description=RTT Service
+Description=RTT Reverse Tunnel Service
 After=network.target
 
 [Service]
@@ -34,10 +34,9 @@ Restart=always
 WantedBy=multi-user.target
 EOF
 
-# فعالسازی و شروع سرویس
-systemctl daemon-reexec
+# فعال‌سازی سرویس
 systemctl daemon-reload
 systemctl enable rtt
 systemctl restart rtt
 
-echo "✅ RTT نصب و فعال شد."
+echo "✅ نصب کامل شد! سرویس روی پورت‌های 443, 8081, و 23902 فعال است."
