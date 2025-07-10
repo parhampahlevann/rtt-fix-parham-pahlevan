@@ -2,16 +2,12 @@
 
 set -e
 
-# رنگ‌ها
 green='\e[32m'
 red='\e[31m'
 yellow='\e[33m'
 blue='\e[34m'
 nc='\e[0m'
 
-echo -e "${green}==> Parham RTT Installer vFinal [Auto Fix]${nc}"
-
-# معماری سیستم
 ARCH=$(uname -m)
 case "$ARCH" in
     x86_64) ARCH_BIN="rtt-linux-amd64" ;;
@@ -22,23 +18,26 @@ esac
 
 BIN_URL="https://github.com/ParhamPahlevanN/rtt-fix-parham-pahlevan/raw/main/binaries/$ARCH_BIN"
 
-install_rtt() {
-    echo -e "${blue}⬇️ Downloading RTT binary for $ARCH_BIN...${nc}"
-    curl -L "$BIN_URL" -o /usr/local/bin/rtt || { echo -e "${red}❌ Failed to download binary.${nc}"; exit 1; }
+install_rtt_binary() {
+    echo -e "${blue}⬇️ Downloading RTT binary...${nc}"
+    curl -L "$BIN_URL" -o /usr/local/bin/rtt
     chmod +x /usr/local/bin/rtt
-
-    echo -e "${green}✅ RTT installed successfully.${nc}"
+    echo -e "${green}✅ RTT binary installed.${nc}"
 }
 
-create_config() {
+install_client() {
+    install_rtt_binary
     mkdir -p /etc/rtt
-    read -p "Enter Token (or leave empty to auto-generate): " TOKEN
+    read -p "Enter Token (or leave blank to auto-generate): " TOKEN
     TOKEN=${TOKEN:-$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 12)}
 
     read -p "Enter SNI [default: pay.anten.ir]: " SNI
     SNI=${SNI:-pay.anten.ir}
 
     read -p "Enter IPv4 of foreign server (outside Iran): " SERVER_IP
+
+    echo -e "${blue}🔌 Testing connectivity to $SERVER_IP:443...${nc}"
+    timeout 5 bash -c "</dev/tcp/$SERVER_IP/443" && echo -e "${green}✅ Port 443 open${nc}" || echo -e "${red}⚠️ Port 443 seems closed or filtered${nc}"
 
     cat > /etc/rtt/config.json <<EOF
 {
@@ -47,6 +46,23 @@ create_config() {
   "foreign_server_ip": "$SERVER_IP"
 }
 EOF
+
+    create_service
+}
+
+install_server() {
+    install_rtt_binary
+    mkdir -p /etc/rtt
+    read -p "Enter Token (same as client): " TOKEN
+
+    cat > /etc/rtt/config.json <<EOF
+{
+  "token": "$TOKEN",
+  "listen": ":443"
+}
+EOF
+
+    create_service
 }
 
 create_service() {
@@ -64,52 +80,39 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
-    systemctl daemon-reexec
     systemctl daemon-reload
     systemctl enable parham-rtt
     systemctl restart parham-rtt
-
     sleep 2
     systemctl status parham-rtt --no-pager
 }
 
-test_port() {
-    echo -e "${blue}🔍 Testing port 443 connectivity to foreign server...${nc}"
-    timeout 5 bash -c "</dev/tcp/${SERVER_IP}/443" && echo -e "${green}✅ Port 443 reachable${nc}" || echo -e "${red}❌ Port 443 blocked or unreachable${nc}"
-}
-
-uninstall() {
-    echo -e "${yellow}⚠️ Uninstalling RTT...${nc}"
+uninstall_rtt() {
+    echo -e "${yellow}🗑️ Uninstalling RTT...${nc}"
     systemctl stop parham-rtt || true
     systemctl disable parham-rtt || true
-    rm -f /usr/local/bin/rtt /etc/systemd/system/parham-rtt.service
+    rm -f /usr/local/bin/rtt
+    rm -f /etc/systemd/system/parham-rtt.service
     rm -rf /etc/rtt
     systemctl daemon-reload
-    echo -e "${green}✅ Uninstalled successfully.${nc}"
+    echo -e "${green}✅ RTT completely uninstalled.${nc}"
     exit 0
 }
 
 main_menu() {
     echo -e "${blue}
-1) Install as Iran (Client)
-2) Uninstall
+🔧 Select installation mode:
+1) Iran (Client)
+2) Foreign (Server)
+3) Uninstall RTT
 ${nc}"
-    read -p "Choose option [1-2]: " CHOICE
+    read -p "Enter choice [1-3]: " CHOICE
 
     case "$CHOICE" in
-        1)
-            install_rtt
-            create_config
-            test_port
-            create_service
-            ;;
-        2)
-            uninstall
-            ;;
-        *)
-            echo -e "${red}❌ Invalid choice${nc}"
-            exit 1
-            ;;
+        1) install_client ;;
+        2) install_server ;;
+        3) uninstall_rtt ;;
+        *) echo -e "${red}❌ Invalid choice${nc}"; exit 1 ;;
     esac
 }
 
