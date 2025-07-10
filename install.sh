@@ -1,47 +1,43 @@
 #!/bin/bash
 
-# رنگ‌ها برای لاگ‌ها
-GREEN='\033[0;32m'
-NC='\033[0m' # No Color
+# نصب پیشنیازها
+apt update -y && apt install curl wget unzip -y
 
-echo -e "${GREEN}نصب RTT و X-ui توسط Parham Pahlevan شروع شد...${NC}"
-
-# آپدیت سیستم
-apt update && apt upgrade -y
-
-# نصب ابزارهای پایه
-apt install -y curl wget unzip socat git cron
-
-# نصب RTT (نسخه بهینه‌شده با مولتی‌پورت)
+# دانلود RTT و خارج کردن فایل‌ها
 mkdir -p /opt/rtt && cd /opt/rtt
-wget -O RtTunnel https://github.com/radkesvat/ReverseTlsTunnel/releases/latest/download/RtTunnel
-chmod +x RtTunnel
+wget https://github.com/radkesvat/ReverseTlsTunnel/releases/latest/download/rtt-linux-amd64.zip -O rtt.zip
+unzip rtt.zip
+chmod +x rtt
 
-# ایجاد سرویس systemd برای اجرای مداوم
-cat > /etc/systemd/system/rtt.service << EOF
+# افزودن پورت‌ها: 8081 و 23902 و 443
+cat > /opt/rtt/config.json <<EOF
+{
+  "listen": [
+    {"local": "0.0.0.0:443", "remote": "127.0.0.1:2087"},
+    {"local": "0.0.0.0:8081", "remote": "127.0.0.1:8081"},
+    {"local": "0.0.0.0:23902", "remote": "127.0.0.1:23902"}
+  ]
+}
+EOF
+
+# ساخت سرویس systemd
+cat > /etc/systemd/system/rtt.service <<EOF
 [Unit]
-Description=Reverse TLS Tunnel
+Description=RTT Service
 After=network.target
 
 [Service]
-ExecStart=/opt/rtt/RtTunnel server -listen :443,:8443,:2087,:2096,:23902,:8081
+ExecStart=/opt/rtt/rtt -config /opt/rtt/config.json
 Restart=always
-User=root
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# راه‌اندازی سرویس RTT
+# فعالسازی و شروع سرویس
 systemctl daemon-reexec
 systemctl daemon-reload
 systemctl enable rtt
-systemctl start rtt
+systemctl restart rtt
 
-echo -e "${GREEN}RTT نصب و راه‌اندازی شد ✅${NC}"
-
-# نصب X-ui
-bash <(curl -Ls https://raw.githubusercontent.com/vaxilu/x-ui/master/install.sh)
-
-echo -e "${GREEN}نصب کامل شد. X-ui در آدرس زیر در دسترس است:${NC}"
-echo -e "${GREEN}http://<IP>:54321 با یوزر admin و رمز admin${NC}"
+echo "✅ RTT نصب و فعال شد."
