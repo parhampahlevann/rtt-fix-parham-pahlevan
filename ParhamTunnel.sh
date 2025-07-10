@@ -2,79 +2,61 @@
 
 set -e
 
-RED='\e[91m'
-GREEN='\e[92m'
-YELLOW='\e[93m'
-BLUE='\e[94m'
-RESET='\e[0m'
+# رنگ‌ها
+green='\e[32m'
+red='\e[31m'
+yellow='\e[33m'
+blue='\e[34m'
+nc='\e[0m'
 
-arch=$(uname -m)
-binary_url=""
+echo -e "${green}==> Parham RTT Installer vFinal [Auto Fix]${nc}"
 
-# تعیین باینری مناسب بر اساس معماری
-case "$arch" in
-  x86_64) binary_url="https://github.com/ParhamPahlevanN/rtt-fix-parham-pahlevan/raw/main/binaries/rtt-linux-amd64" ;;
-  aarch64) binary_url="https://github.com/ParhamPahlevanN/rtt-fix-parham-pahlevan/raw/main/binaries/rtt-linux-arm64" ;;
-  armv7l) binary_url="https://github.com/ParhamPahlevanN/rtt-fix-parham-pahlevan/raw/main/binaries/rtt-linux-arm" ;;
-  *) echo -e "${RED}Unsupported architecture: $arch${RESET}"; exit 1 ;;
+# معماری سیستم
+ARCH=$(uname -m)
+case "$ARCH" in
+    x86_64) ARCH_BIN="rtt-linux-amd64" ;;
+    aarch64) ARCH_BIN="rtt-linux-arm64" ;;
+    armv7l) ARCH_BIN="rtt-linux-arm" ;;
+    *) echo -e "${red}❌ Unsupported architecture: $ARCH${nc}"; exit 1 ;;
 esac
 
-echo -e "${YELLOW}Parham RTT Tunnel Script${RESET}"
-echo ""
-echo "1) Iran (Client)"
-echo "2) Foreign (Server)"
-echo "3) Uninstall RTT"
-read -p "Enter choice [1 or 2 or 3]: " choice
+BIN_URL="https://github.com/ParhamPahlevanN/rtt-fix-parham-pahlevan/raw/main/binaries/$ARCH_BIN"
 
-if [[ $choice == 3 ]]; then
-  echo -e "${YELLOW}Removing RTT...${RESET}"
-  systemctl stop parham-rtt.service || true
-  systemctl disable parham-rtt.service || true
-  rm -f /etc/systemd/system/parham-rtt.service
-  rm -f /usr/local/bin/rtt
-  rm -f /usr/local/bin/config.json
-  systemctl daemon-reload
-  echo -e "${GREEN}✅ RTT successfully removed.${RESET}"
-  exit 0
-fi
+install_rtt() {
+    echo -e "${blue}⬇️ Downloading RTT binary for $ARCH_BIN...${nc}"
+    curl -L "$BIN_URL" -o /usr/local/bin/rtt || { echo -e "${red}❌ Failed to download binary.${nc}"; exit 1; }
+    chmod +x /usr/local/bin/rtt
 
-read -p "Enter Token (or leave empty to auto-generate): " token
-token=${token:-$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 10)}
+    echo -e "${green}✅ RTT installed successfully.${nc}"
+}
 
-read -p "Enter SNI (e.g. www.cloudflare.com) [Default: pay.anten.ir]: " sni
-sni=${sni:-pay.anten.ir}
+create_config() {
+    mkdir -p /etc/rtt
+    read -p "Enter Token (or leave empty to auto-generate): " TOKEN
+    TOKEN=${TOKEN:-$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 12)}
 
-read -p "Enter IPv4 of foreign server (outside Iran): " server_ip
+    read -p "Enter SNI [default: pay.anten.ir]: " SNI
+    SNI=${SNI:-pay.anten.ir}
 
-# تست باز بودن پورت 443 روی آی‌پی
-echo -e "${BLUE}Testing connection to ${server_ip}:443...${RESET}"
-timeout 3 bash -c "</dev/tcp/${server_ip}/443" 2>/dev/null \
-  && echo -e "${GREEN}✅ Port 443 is open${RESET}" \
-  || { echo -e "${RED}❌ Port 443 is not reachable. Check firewall or IP.${RESET}"; exit 1; }
+    read -p "Enter IPv4 of foreign server (outside Iran): " SERVER_IP
 
-echo -e "${BLUE}📥 Downloading RTT binary...${RESET}"
-curl -L "$binary_url" -o /usr/local/bin/rtt
-chmod +x /usr/local/bin/rtt
-
-echo -e "${GREEN}✅ RTT binary installed successfully.${RESET}"
-
-echo -e "${BLUE}⚙️ Creating config file...${RESET}"
-cat <<EOF > /usr/local/bin/config.json
+    cat > /etc/rtt/config.json <<EOF
 {
-  "remote": "$server_ip:443",
-  "token": "$token",
-  "sni": "$sni"
+  "token": "$TOKEN",
+  "sni": "$SNI",
+  "foreign_server_ip": "$SERVER_IP"
 }
 EOF
+}
 
-echo -e "${BLUE}⚙️ Creating systemd service...${RESET}"
-cat <<EOF > /etc/systemd/system/parham-rtt.service
+create_service() {
+    cat > /etc/systemd/system/parham-rtt.service <<EOF
 [Unit]
 Description=Parham RTT Tunnel Service
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/rtt -config /usr/local/bin/config.json
+ExecStart=/usr/local/bin/rtt -config /etc/rtt/config.json
 Restart=always
 RestartSec=3
 
@@ -82,15 +64,53 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable parham-rtt.service
-systemctl restart parham-rtt.service
+    systemctl daemon-reexec
+    systemctl daemon-reload
+    systemctl enable parham-rtt
+    systemctl restart parham-rtt
 
-sleep 2
-if systemctl is-active --quiet parham-rtt.service; then
-  echo -e "${GREEN}✅ RTT tunnel installed and started successfully!${RESET}"
-  echo -e "${YELLOW}Token: $token${RESET}"
-else
-  echo -e "${RED}❌ Failed to start RTT.${RESET}"
-  echo -e "📄 View logs: ${BLUE}journalctl -u parham-rtt -e${RESET}"
-fi
+    sleep 2
+    systemctl status parham-rtt --no-pager
+}
+
+test_port() {
+    echo -e "${blue}🔍 Testing port 443 connectivity to foreign server...${nc}"
+    timeout 5 bash -c "</dev/tcp/${SERVER_IP}/443" && echo -e "${green}✅ Port 443 reachable${nc}" || echo -e "${red}❌ Port 443 blocked or unreachable${nc}"
+}
+
+uninstall() {
+    echo -e "${yellow}⚠️ Uninstalling RTT...${nc}"
+    systemctl stop parham-rtt || true
+    systemctl disable parham-rtt || true
+    rm -f /usr/local/bin/rtt /etc/systemd/system/parham-rtt.service
+    rm -rf /etc/rtt
+    systemctl daemon-reload
+    echo -e "${green}✅ Uninstalled successfully.${nc}"
+    exit 0
+}
+
+main_menu() {
+    echo -e "${blue}
+1) Install as Iran (Client)
+2) Uninstall
+${nc}"
+    read -p "Choose option [1-2]: " CHOICE
+
+    case "$CHOICE" in
+        1)
+            install_rtt
+            create_config
+            test_port
+            create_service
+            ;;
+        2)
+            uninstall
+            ;;
+        *)
+            echo -e "${red}❌ Invalid choice${nc}"
+            exit 1
+            ;;
+    esac
+}
+
+main_menu
