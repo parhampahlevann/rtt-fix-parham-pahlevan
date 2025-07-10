@@ -8,8 +8,8 @@ BIN_NAME="rathole"
 INSTALL_DIR="/usr/local/bin"
 
 function install_rtt_binary() {
-    echo -e "${GREEN}⬇️ در حال دریافت فایل باینری RTT...${NC}"
-    wget -qO rtt.tar.gz "$BIN_URL" || { echo "❌ دریافت فایل ناموفق بود."; exit 1; }
+    echo -e "${GREEN}[+] Downloading RTT binary...${NC}"
+    wget -qO rtt.tar.gz "$BIN_URL" || { echo "❌ Failed to download RTT binary."; exit 1; }
     tar -xzf rtt.tar.gz
     mv "$BIN_NAME" "$INSTALL_DIR/rtt"
     chmod +x "$INSTALL_DIR/rtt"
@@ -17,18 +17,18 @@ function install_rtt_binary() {
 }
 
 function uninstall_rtt() {
-    echo -e "${GREEN}🧹 در حال حذف کامل RTT...${NC}"
+    echo -e "${GREEN}[+] Removing RTT service...${NC}"
     systemctl stop rtt
     systemctl disable rtt
     rm -f /etc/systemd/system/rtt.service
     rm -f /usr/local/bin/rtt
     rm -rf /etc/rtt
-    echo -e "${GREEN}✅ حذف کامل شد.${NC}"
+    echo -e "${GREEN}[✓] Uninstalled successfully.${NC}"
     exit 0
 }
 
 function create_server_config() {
-    echo -e "${GREEN}📝 در حال ساخت کانفیگ سرور...${NC}"
+    echo -e "${GREEN}[+] Creating server config...${NC}"
     mkdir -p /etc/rtt
     cat > /etc/rtt/config.toml <<EOF
 [server]
@@ -46,7 +46,7 @@ EOF
 }
 
 function create_client_config() {
-    echo -e "${GREEN}📝 در حال ساخت کانفیگ کلاینت...${NC}"
+    echo -e "${GREEN}[+] Creating client config...${NC}"
     mkdir -p /etc/rtt
     cat > /etc/rtt/config.toml <<EOF
 [client]
@@ -64,55 +64,54 @@ EOF
 }
 
 function create_service() {
-    echo -e "${GREEN}🔧 در حال ساخت سرویس systemd...${NC}"
+    echo -e "${GREEN}[+] Creating systemd service...${NC}"
     cat > /etc/systemd/system/rtt.service <<EOF
 [Unit]
-Description=RTT Tunnel
+Description=ParhamTunnel RTT Service
 After=network.target
 
 [Service]
 ExecStart=$INSTALL_DIR/rtt -c /etc/rtt/config.toml
-Restart=on-failure
+Restart=always
 RestartSec=3
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-    systemctl daemon-reexec
     systemctl daemon-reload
     systemctl enable rtt
-    systemctl start rtt
+    systemctl restart rtt
     sleep 1
     systemctl status rtt --no-pager
 }
 
-function main_menu() {
+function show_menu() {
     clear
-    echo -e "${GREEN}============================="
-    echo "     Parham Tunnel Setup"
-    echo -e "=============================${NC}"
-    echo "1. نصب روی سرور ایران (Client)"
-    echo "2. نصب روی سرور خارج (Server)"
-    echo "3. حذف کامل سرویس"
-    echo "0. خروج"
-    read -p "➤ گزینه مورد نظر را انتخاب کنید: " CHOICE
+    echo -e "${GREEN}=============================="
+    echo "      ParhamTunnel Setup"
+    echo -e "==============================${NC}"
+    echo "1. Install on IR Server (Client)"
+    echo "2. Install on Outside IR Server (Server)"
+    echo "3. Uninstall Tunnel"
+    echo "0. Exit"
+    read -p "Select an option: " CHOICE
 
     case "$CHOICE" in
         1)
-            read -p "🌐 آدرس IPv4 سرور خارج را وارد کنید: " SERVER_IP
-            read -p "🔐 رمز توکن اتصال (Token): " TOKEN
+            read -p "Enter outside server IPv4 address: " SERVER_IP
+            read -p "Enter token (secret password): " TOKEN
             install_rtt_binary
             create_client_config "$SERVER_IP" "$TOKEN"
             create_service
-            echo -e "${GREEN}✅ نصب کلاینت با موفقیت انجام شد.${NC}"
+            echo -e "${GREEN}[✓] Client setup completed.${NC}"
             ;;
         2)
-            read -p "🔐 رمز توکن اتصال (Token): " TOKEN
+            read -p "Enter token (secret password): " TOKEN
             install_rtt_binary
             create_server_config "$TOKEN"
             create_service
-            echo -e "${GREEN}✅ نصب سرور با موفقیت انجام شد.${NC}"
+            echo -e "${GREEN}[✓] Server setup completed.${NC}"
             ;;
         3)
             uninstall_rtt
@@ -121,11 +120,11 @@ function main_menu() {
             exit 0
             ;;
         *)
-            echo "❌ گزینه نامعتبر!"
+            echo "❌ Invalid option."
             sleep 1
-            main_menu
+            show_menu
             ;;
     esac
 }
 
-main_menu
+show_menu
