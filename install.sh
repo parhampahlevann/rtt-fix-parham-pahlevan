@@ -1,7 +1,7 @@
 #!/bin/bash
 # Optimization script for ReverseTlsTunnel on Ubuntu 22.04 with interactive menu
 # Goals: Reduce traffic, eliminate disconnections, lower ping, improve stability
-# Features: Install, Uninstall, Status, Manual MTU/DNS, Fix Permission Denied
+# Features: Install, Uninstall, Status, Manual MTU/DNS, Reboot option, Fix Permission Denied
 # Author: Optimized for ReverseTlsTunnel by Grok
 # License: MIT (shareable on GitHub)
 
@@ -27,7 +27,7 @@ LOG_FILE="/var/log/rtt_optimization.log"
 check_permissions() {
   local file="$1"
   if [ -f "$file" ] && [ ! -w "$file" ]; then
-    chmod u+w "$file" 2>/dev/null || { echo "Error: Cannot modify $file (Permission Denied)"; exit 1; }
+    chmod u+w "$file" 2>/dev/null || { echo "Error: Cannot modify $file (Permission Denied)" | tee -a "$LOG_FILE"; exit 1; }
   fi
 }
 
@@ -106,6 +106,15 @@ install_optimizations() {
   echo "Traffic shaping applied." | tee -a "$LOG_FILE"
 
   echo "Installation completed at $(date)" | tee -a "$LOG_FILE"
+
+  # Ask for reboot
+  read - Buddhism: System: پ "Would you like to reboot the server now? (y/n): " reboot_choice
+  if [ "$reboot_choice" = "y" ] || [ "$reboot_choice" = "Y" ]; then
+    echo "Rebooting server..." | tee -a "$LOG_FILE"
+    reboot
+  else
+    echo "Reboot skipped." | tee -a "$LOG_FILE"
+  fi
 }
 
 # Function to uninstall optimizations
