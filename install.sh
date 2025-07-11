@@ -3,7 +3,7 @@ set -e
 
 echo "🔧 Installing ReverseTlsTunnel (RTT) v1.4.2"
 
-# Configuration
+# === Configuration ===
 VERSION="v1.4.2"
 BASE_URL="https://github.com/levindoneto/ReverseTlsTunnel/releases/download/$VERSION"
 INSTALL_DIR="/opt/reversetlstunnel"
@@ -12,7 +12,7 @@ SERVICE_NAME="rtt"
 SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
 CONFIG_FILE="$INSTALL_DIR/config.env"
 
-# Detect architecture
+# === Architecture Detection ===
 ARCH=$(uname -m)
 case "$ARCH" in
   x86_64) ARCH_DL="amd64" ;;
@@ -25,42 +25,38 @@ case "$ARCH" in
     ;;
 esac
 
-# Install required packages
+# === Dependencies ===
 echo "📦 Installing required packages..."
-sudo apt update -y && sudo apt install -y wget unzip file systemd || {
-  echo "❌ Failed to install dependencies"
-  exit 1
-}
+sudo apt update -y
+sudo apt install -y curl wget unzip file systemd > /dev/null
 
-# Prepare directory
-echo "📁 Creating install directory..."
+# === Prepare Installation Directory ===
+echo "📁 Setting up install directory..."
 sudo mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
 
-# Download binary
+# === Download Binary ===
 BIN_URL="$BASE_URL/rtt-linux-$ARCH_DL.zip"
-echo "📥 Downloading RTT binary from:"
-echo "$BIN_URL"
-
-wget -q "$BIN_URL" -O rtt.zip || {
-  echo "❌ Failed to download RTT binary. Please check internet connection or GitHub availability."
+echo "📥 Downloading RTT binary from $BIN_URL..."
+wget -q --show-progress "$BIN_URL" -O rtt.zip || {
+  echo "❌ Failed to download RTT binary. Check your internet or GitHub availability."
   exit 1
 }
 
-# Unzip and validate
-echo "📦 Extracting RTT binary..."
+# === Extract and Validate ===
+echo "📦 Extracting RTT..."
 unzip -o rtt.zip > /dev/null || {
   echo "❌ Failed to unzip RTT binary."
   exit 1
 }
 chmod +x "$BIN_NAME"
 file "$BIN_NAME" | grep -q "ELF" || {
-  echo "❌ The downloaded binary is not a valid ELF executable."
+  echo "❌ Invalid RTT binary format (not ELF)."
   exit 1
 }
 
-# Generate config.env
-echo "🛠️ Writing config.env..."
+# === Create Config ===
+echo "🛠️ Creating config.env..."
 cat <<EOF | sudo tee "$CONFIG_FILE" > /dev/null
 REMOTE_HOST=your.server.ip
 REMOTE_PORT=443
@@ -70,12 +66,12 @@ RECONNECT_DELAY=5
 MAX_RETRIES=0
 EOF
 
-# Load config to prepare command flags
+# === Load Config ===
 source "$CONFIG_FILE"
 EXTRA_FLAGS=""
 [[ "$USE_COMPRESSION" == "true" ]] && EXTRA_FLAGS="-z"
 
-# Create systemd service
+# === Create Systemd Service ===
 echo "🧩 Creating systemd service..."
 cat <<EOF | sudo tee "$SERVICE_FILE" > /dev/null
 [Unit]
@@ -95,13 +91,12 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
-# Enable & start service
-echo "🚀 Enabling and starting service..."
+# === Enable & Start Service ===
+echo "🚀 Enabling and starting RTT service..."
 sudo systemctl daemon-reload
 sudo systemctl enable "$SERVICE_NAME"
 sudo systemctl restart "$SERVICE_NAME"
 
-# Final check
-sleep 1
-echo -e "\n✅ RTT has been installed and started successfully!"
-systemctl status "$SERVICE_NAME" --no-pager | head -n 10
+# === Final Status ===
+echo -e "\n✅ RTT installed successfully and service is running!"
+systemctl status "$SERVICE_NAME" --no-pager | head -n 12
