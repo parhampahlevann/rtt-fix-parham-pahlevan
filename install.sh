@@ -8,16 +8,36 @@ fi
 
 # Default variables
 DEFAULT_MTU=1420
-INTERFACE="eth0" # Change this if you have a different network interface
 DEFAULT_DNS1="1.1.1.1"
 DEFAULT_DNS2="8.8.8.8"
 
-# Verify network interface exists
-ip link show $INTERFACE > /dev/null 2>&1
-if [ $? -ne 0 ]; then
-    echo "Network interface $INTERFACE not found! Please check the interface name."
-    exit 1
-fi
+# Function to detect or select network interface
+select_network_interface() {
+    # Try common interfaces first
+    for iface in eth0 ens3; do
+        if ip link show "$iface" > /dev/null 2>&1; then
+            INTERFACE="$iface"
+            return 0
+        fi
+    done
+
+    # If no common interface is found, list available interfaces
+    echo "No common network interface (eth0 or ens3) found!"
+    echo "Available network interfaces:"
+    ip link show | grep -E '^[0-9]+: ' | awk '{print $2}' | sed 's/://' | while read -r iface; do
+        echo "- $iface"
+    done
+    read -p "Please enter the network interface name: " INTERFACE
+    if ip link show "$INTERFACE" > /dev/null 2>&1; then
+        echo "Selected interface: $INTERFACE"
+    else
+        echo "Invalid interface $INTERFACE! Exiting."
+        exit 1
+    fi
+}
+
+# Select network interface
+select_network_interface
 
 # Backup original sysctl.conf
 SYSCTL_BACKUP="/etc/sysctl.conf.bak"
@@ -31,7 +51,7 @@ install_optimizations() {
 
     # Set default MTU
     echo "Setting MTU to $DEFAULT_MTU for interface $INTERFACE..."
-    ip link set dev $INTERFACE mtu $DEFAULT_MTU
+    ip link set dev "$INTERFACE" mtu $DEFAULT_MTU
     if [ $? -eq 0 ]; then
         echo "MTU successfully set to $DEFAULT_MTU."
     else
@@ -152,7 +172,7 @@ uninstall_optimizations() {
 
     # Reset MTU to default (1500)
     echo "Resetting MTU to 1500 for interface $INTERFACE..."
-    ip link set dev $INTERFACE mtu 1500
+    ip link set dev "$INTERFACE" mtu 1500
 
     # Disable ufw
     echo "Disabling ufw..."
@@ -177,7 +197,7 @@ show_status() {
     fi
 
     # Check current MTU
-    CURRENT_MTU=$(ip link show $INTERFACE | grep -oP 'mtu \K\d+')
+    CURRENT_MTU=$(ip link show "$INTERFACE" | grep -oP 'mtu \K\d+')
     echo "Current MTU: $CURRENT_MTU"
 
     # Check congestion control
@@ -198,10 +218,10 @@ show_status() {
 
 # Function to change MTU
 change_mtu() {
-    echo "Current MTU: $(ip link show $INTERFACE | grep -oP 'mtu \K\d+')"
+    echo "Current MTU: $(ip link show "$INTERFACE" | grep -oP 'mtu \K\d+')"
     read -p "Enter new MTU value (between 1280 and 1500, default $DEFAULT_MTU): " CUSTOM_MTU
     if [[ "$CUSTOM_MTU" =~ ^[0-9]+$ && "$CUSTOM_MTU" -ge 1280 && "$CUSTOM_MTU" -le 1500 ]]; then
-        ip link set dev $INTERFACE mtu $CUSTOM_MTU
+        ip link set dev "$INTERFACE" mtu $CUSTOM_MTU
         echo "MTU set to $CUSTOM_MTU."
     else
         echo "Invalid MTU value! Keeping current MTU."
