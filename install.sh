@@ -1,8 +1,7 @@
 #!/bin/bash
 # Optimization script for ReverseTlsTunnel on Ubuntu 22.04 with interactive menu
 # Goals: Reduce traffic, eliminate disconnections, lower ping, improve stability
-# Features: Install, Uninstall, Status, Manual MTU/DNS, Reboot option (menu and after install), Fix Permission Denied
-# Fixes: Netdata cloud.conf error, Reverse TLS not found, Service not running
+# Features: Install, Uninstall, Status, Manual MTU/DNS, Fix Permission Denied, Reboot
 # Author: Optimized for ReverseTlsTunnel by Grok
 # License: MIT (shareable on GitHub)
 
@@ -28,50 +27,8 @@ LOG_FILE="/var/log/rtt_optimization.log"
 check_permissions() {
   local file="$1"
   if [ -f "$file" ] && [ ! -w "$file" ]; then
-    chmod u+w "$file" 2>/dev/null || { echo "Error: Cannot modify $file (Permission Denied)" | tee -a "$LOG_FILE"; exit 1; }
+    chmod u+w "$file" 2>/dev/null || { echo "Error: Cannot modify $file (Permission Denied)"; exit 1; }
   fi
-}
-
-# Function to find ReverseTlsTunnel service name
-find_rtt_service() {
-  local possible_names=("rtt" "reversetlstunnel" "reverse-tls-tunnel")
-  for name in "${possible_names[@]}"; do
-    if systemctl list-units --full -all | grep -q "$name"; then
-      echo "$name"
-      return 0
-    fi
-  done
-  echo ""
-  return 1
-}
-
-# Function to reboot server
-reboot_server() {
-  echo -n "Would you like to reboot the server now? (y/n): "
-  read -r reboot_choice
-  if [ "$reboot_choice" = "y" ] || [ "$reboot_choice" = "Y" ]; then
-    echo "Rebooting server..." | tee -a "$LOG_FILE"
-    sleep 2 # Brief delay to ensure log is written
-    reboot
-  else
-    echo "Reboot skipped." | tee -a "$LOG_FILE"
-  fi
-}
-
-# Function to fix Netdata cloud.conf error
-fix_netdata_cloud() {
-  echo "Fixing Netdata cloud.conf issue..." | tee -a "$LOG_FILE"
-  # Create necessary directories
-  mkdir -p /var/lib/netdata/cloud.d /var/log/netdata /var/cache/netdata
-  chown -R netdata:netdata /var/lib/netdata /var/log/netdata /var/cache/netdata
-  chmod -R 770 /var/lib/netdata/cloud.d
-  # Create empty cloud.conf to suppress error
-  touch /var/lib/netdata/cloud.d/cloud.conf
-  chown netdata:netdata /var/lib/netdata/cloud.d/cloud.conf
-  chmod 660 /var/lib/netdata/cloud.d/cloud.conf
-  echo "[global]" > /var/lib/netdata/cloud.d/cloud.conf
-  echo "enabled = no" >> /var/lib/netdata/cloud.d/cloud.conf
-  echo "Netdata cloud.conf created and disabled." | tee -a "$LOG_FILE"
 }
 
 # Function to install optimizations
@@ -128,35 +85,19 @@ install_optimizations() {
   apt-get install -y netdata
   systemctl enable netdata
   systemctl start netdata
-  # Fix Netdata cloud.conf issue
-  fix_netdata_cloud
-  if systemctl is-active --quiet netdata; then
-    echo "Netdata installed and running. Access at http://$(hostname -I | awk '{print $1}'):19999" | tee -a "$LOG_FILE"
-  else
-    echo "Error: Netdata failed to start. Check /var/log/netdata/error.log" | tee -a "$LOG_FILE"
-    exit 1
-  fi
+  echo "Netdata installed. Access at http://$(hostname -I | awk '{print $1}'):19999" | tee -a "$LOG_FILE"
 
   # Optimize ReverseTlsTunnel service
-  RTT_SERVICE=$(find_rtt_service)
-  if [ -n "$RTT_SERVICE" ]; then
+  if systemctl list-units | grep -q "rtt"; then
     check_permissions "/etc/security/limits.conf"
     echo "* soft nofile 65535" >> /etc/security/limits.conf
     echo "* hard nofile 65535" >> /etc/security/limits.conf
-    systemctl set-property "$RTT_SERVICE".service CPUSchedulingPolicy=rr CPUSchedulingPriority=20 IOSchedulingClass=best-effort IOSchedulingPriority=2
+    systemctl set-property rtt.service CPUSchedulingPolicy=rr CPUSchedulingPriority=20 IOSchedulingClass=best-effort IOSchedulingPriority=2
     systemctl daemon-reload
-    systemctl restart "$RTT_SERVICE"
-    if systemctl is-active --quiet "$RTT_SERVICE"; then
-      echo "ReverseTlsTunnel service ($RTT_SERVICE) optimized and running." | tee -a "$LOG_FILE"
-    else
-      echo "Error: Failed to start ReverseTlsTunnel service ($RTT_SERVICE)." | tee -a "$LOG_FILE"
-      echo "Please ensure ReverseTlsTunnel is installed correctly. Check 'systemctl status $RTT_SERVICE' for details." | tee -a "$LOG_FILE"
-      exit 1
-    fi
+    systemctl restart rtt
+    echo "ReverseTlsTunnel service optimized." | tee -a "$LOG_FILE"
   else
-    echo "Error: ReverseTlsTunnel service not found. Please install it first." | tee -a "$LOG_FILE"
-    echo "Run: wget https://raw.githubusercontent.com/radkesvat/ReverseTlsTunnel/master/scripts/install.sh -O install.sh && chmod +x install.sh && bash install.sh" | tee -a "$LOG_FILE"
-    exit 1
+    echo "Warning: ReverseTlsTunnel service not found." | tee -a "$LOG_FILE"
   fi
 
   # Apply traffic shaping
@@ -165,17 +106,6 @@ install_optimizations() {
   echo "Traffic shaping applied." | tee -a "$LOG_FILE"
 
   echo "Installation completed at $(date)" | tee -a "$LOG_FILE"
-
-  # Ask for reboot after installation
-  echo -n "Would you like to reboot the server now? (y/n): "
-  read -r reboot_choice
-  if [ "$reboot_choice" = "y" ] || [ "$reboot_choice" = "Y" ]; then
-    echo "Rebooting server..." | tee -a "$LOG_FILE"
-    sleep 2 # Brief delay to ensure log is written
-    reboot
-  else
-    echo "Reboot skipped." | tee -a "$LOG_FILE"
-  fi
 }
 
 # Function to uninstall optimizations
@@ -203,8 +133,7 @@ uninstall_optimizations() {
   if command -v netdata >/dev/null; then
     systemctl stop netdata
     apt-get purge -y netdata
-    rm -rf /var/lib/netdata /var/log/netdata /var/cache/netdata
-    echo "Removed netdata and its directories." | tee -a "$LOG_FILE"
+    echo "Removed netdata." | tee -a "$LOG_FILE"
   fi
 
   # Remove traffic shaping
@@ -218,12 +147,11 @@ uninstall_optimizations() {
   fi
 
   # Reset rtt service optimizations
-  RTT_SERVICE=$(find_rtt_service)
-  if [ -n "$RTT_SERVICE" ]; then
-    systemctl set-property "$RTT_SERVICE".service CPUSchedulingPolicy=other CPUSchedulingPriority=0 IOSchedulingClass=idle IOSchedulingPriority=7
+  if systemctl list-units | grep -q "rtt"; then
+    systemctl set-property rtt.service CPUSchedulingPolicy=other CPUSchedulingPriority=0 IOSchedulingClass=idle IOSchedulingPriority=7
     systemctl daemon-reload
-    systemctl restart "$RTT_SERVICE"
-    echo "Reset ReverseTlsTunnel service ($RTT_SERVICE) settings." | tee -a "$LOG_FILE"
+    systemctl restart rtt
+    echo "Reset ReverseTlsTunnel service settings." | tee -a "$LOG_FILE"
   fi
 
   echo "Uninstallation completed at $(date)" | tee -a "$LOG_FILE"
@@ -241,13 +169,8 @@ show_status() {
   ufw status 2>/dev/null || echo "ufw not installed."
   echo "Netdata Status:"
   systemctl status netdata --no-pager 2>/dev/null || echo "Netdata not installed."
-  RTT_SERVICE=$(find_rtt_service)
-  if [ -n "$RTT_SERVICE" ]; then
-    echo "ReverseTlsTunnel Service ($RTT_SERVICE):"
-    systemctl status "$RTT_SERVICE" --no-pager 2>/dev/null || echo "ReverseTlsTunnel not running."
-  else
-    echo "ReverseTlsTunnel Service: Not found."
-  fi
+  echo "ReverseTlsTunnel Service:"
+  systemctl status rtt --no-pager 2>/dev/null || echo "ReverseTlsTunnel not running."
   echo "Current MTU (eth0): $(ip link show eth0 | grep mtu | awk '{print $5}')"
   echo "Current DNS: $(cat /etc/resolv.conf | grep nameserver)"
   echo "-------------------" | tee -a "$LOG_FILE"
@@ -272,6 +195,12 @@ change_mtu_dns() {
   fi
 }
 
+# Function to reboot the system
+reboot_system() {
+  echo "Rebooting system..." | tee -a "$LOG_FILE"
+  reboot
+}
+
 # Interactive Menu
 while true; do
   echo "ReverseTlsTunnel Optimization Menu"
@@ -280,7 +209,7 @@ while true; do
   echo "3. Show status"
   echo "4. Change MTU and DNS"
   echo "5. Exit"
-  echo "6. Reboot server"
+  echo "6. Reboot"
   read -p "Select an option [1-6]: " choice
 
   case $choice in
@@ -301,7 +230,7 @@ while true; do
       exit 0
       ;;
     6)
-      reboot_server
+      reboot_system
       ;;
     *)
       echo "Invalid option. Please select 1-6."
