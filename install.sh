@@ -9,7 +9,6 @@ fi
 # Default variables
 DEFAULT_MTU=1420
 INTERFACE="eth0" # Change this if you have a different network interface
-TRAFFIC_RATE="50mbit" # Default rate for video streaming
 DEFAULT_DNS1="1.1.1.1"
 DEFAULT_DNS2="8.8.8.8"
 
@@ -124,39 +123,14 @@ EOT
         echo "Error setting priority for rtt service. Please check if the rtt service exists."
     fi
 
-    # Configure Traffic Shaping
-    echo "Configuring Traffic Shaping with rate $TRAFFIC_RATE..."
-    tc qdisc add dev $INTERFACE root handle 1: htb default 10
-    tc class add dev $INTERFACE parent 1: classid 1:10 htb rate $TRAFFIC_RATE
-    tc qdisc add dev $INTERFACE parent 1:10 handle 10: fq_codel
-    if [ $? -eq 0 ]; then
-        echo "Traffic Shaping successfully configured."
-    else
-        echo "Error configuring Traffic Shaping! Please check tc configuration."
-    fi
-
-    # Prioritize HTTPS traffic (port 443)
-    tc filter add dev $INTERFACE protocol ip parent 1: prio 1 u32 match ip dport 443 0xffff flowid 1:10
-    tc filter add dev $INTERFACE protocol ip parent 1: prio 1 u32 match ip sport 443 0xffff flowid 1:10
-
-    # Configure firewall (ufw)
-    echo "Configuring firewall to allow ports 22 and 443..."
-    ufw allow 22
-    ufw allow 443
-    ufw --force enable
+    # Disable ufw
+    echo "Disabling ufw..."
+    ufw disable
 
     # Set default DNS
     echo "Setting default DNS servers ($DEFAULT_DNS1, $DEFAULT_DNS2)..."
     echo "nameserver $DEFAULT_DNS1" > /etc/resolv.conf
     echo "nameserver $DEFAULT_DNS2" >> /etc/resolv.conf
-
-    # Install Netdata for monitoring
-    if ! command -v netdata &> /dev/null; then
-        echo "Installing Netdata for real-time monitoring..."
-        bash <(curl -Ss https://my-netdata.io/kickstart.sh) --dont-wait
-    else
-        echo "Netdata is already installed."
-    fi
 
     echo "BBR VIP optimizations installed successfully!"
 }
@@ -180,26 +154,13 @@ uninstall_optimizations() {
     echo "Resetting MTU to 1500 for interface $INTERFACE..."
     ip link set dev $INTERFACE mtu 1500
 
-    # Remove Traffic Shaping
-    echo "Removing Traffic Shaping configuration..."
-    tc qdisc del dev $INTERFACE root 2>/dev/null
-
-    # Reset firewall
-    echo "Resetting firewall rules..."
-    ufw --force reset
-    ufw --force enable
+    # Disable ufw
+    echo "Disabling ufw..."
+    ufw disable
 
     # Reset DNS to system defaults
     echo "Resetting DNS to system defaults..."
     echo "" > /etc/resolv.conf
-
-    # Remove Netdata (optional, prompt user)
-    read -p "Do you want to uninstall Netdata? (y/n): " netdata_choice
-    if [[ "$netdata_choice" == "y" || "$netdata_choice" == "Y" ]]; then
-        echo "Uninstalling Netdata..."
-        systemctl stop netdata
-        apt-get remove --purge netdata -y 2>/dev/null || yum remove netdata -y 2>/dev/null
-    fi
 
     echo "Optimizations uninstalled successfully!"
 }
@@ -227,11 +188,11 @@ show_status() {
     echo "Current DNS servers:"
     cat /etc/resolv.conf | grep nameserver || echo "No DNS servers configured."
 
-    # Check Netdata status
-    if command -v netdata &> /dev/null && systemctl is-active netdata >/dev/null 2>&1; then
-        echo "Netdata: Running (Access at http://<your-server-ip>:19999)"
+    # Check ufw status
+    if ufw status | grep -q "inactive"; then
+        echo "ufw: Disabled"
     else
-        echo "Netdata: Not installed or not running"
+        echo "ufw: Enabled"
     fi
 }
 
