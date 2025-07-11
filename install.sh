@@ -2,14 +2,16 @@
 
 # Check for root privileges
 if [[ $EUID -ne 0 ]]; then
-   echo "This script requires root privileges. Please run with sudo or as the root user!"
-   exit 1
+    echo "This script requires root privileges. Please run with sudo or as the root user!"
+    exit 1
 fi
 
 # Default variables
 DEFAULT_MTU=1420
 INTERFACE="eth0" # Change this if you have a different network interface
 TRAFFIC_RATE="50mbit" # Default rate for video streaming
+DEFAULT_DNS1="1.1.1.1"
+DEFAULT_DNS2="8.8.8.8"
 
 # Verify network interface exists
 ip link show $INTERFACE > /dev/null 2>&1
@@ -18,78 +20,75 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# Set default MTU
-echo "Setting MTU to $DEFAULT_MTU for interface $INTERFACE..."
-ip link set dev $INTERFACE mtu $DEFAULT_MTU
-if [ $? -eq 0 ]; then
-    echo "MTU successfully set to $DEFAULT_MTU."
-else
-    echo "Error setting MTU! Please check the network interface or permissions."
-    exit 1
+# Backup original sysctl.conf
+SYSCTL_BACKUP="/etc/sysctl.conf.bak"
+if [ ! -f "$SYSCTL_BACKUP" ]; then
+    cp /etc/sysctl.conf "$SYSCTL_BACKUP"
 fi
 
-# Option to manually set MTU
-read -p "Do you want to manually set the MTU? (y/n, default $DEFAULT_MTU): " choice
-if [[ "$choice" == "y" || "$choice" == "Y" ]]; then
-    read -p "Please enter the new MTU value (between 1280 and 1500): " CUSTOM_MTU
-    if [[ "$CUSTOM_MTU" =~ ^[0-9]+$ && "$CUSTOM_MTU" -ge 1280 && "$CUSTOM_MTU" -le 1500 ]]; then
-        ip link set dev $INTERFACE mtu $CUSTOM_MTU
-        echo "MTU set to $CUSTOM_MTU."
+# Function to install optimizations
+install_optimizations() {
+    echo "Installing BBR VIP optimizations by Parham Pahlevan..."
+
+    # Set default MTU
+    echo "Setting MTU to $DEFAULT_MTU for interface $INTERFACE..."
+    ip link set dev $INTERFACE mtu $DEFAULT_MTU
+    if [ $? -eq 0 ]; then
+        echo "MTU successfully set to $DEFAULT_MTU."
     else
-        echo "Invalid MTU value! Default value $DEFAULT_MTU will be retained."
+        echo "Error setting MTU! Please check the network interface or permissions."
+        exit 1
     fi
-fi
 
-# Apply TCP and network optimizations
-echo "Applying TCP optimizations for streaming and downloading..."
+    # Apply TCP and network optimizations
+    echo "Applying TCP optimizations for streaming and downloading..."
 
-# TCP Keepalive for connection stability
-sysctl -w net.ipv4.tcp_keepalive_time=300
-sysctl -w net.ipv4.tcp_keepalive_intvl=60
-sysctl -w net.ipv4.tcp_keepalive_probes=10
+    # TCP Keepalive for connection stability
+    sysctl -w net.ipv4.tcp_keepalive_time=300
+    sysctl -w net.ipv4.tcp_keepalive_intvl=60
+    sysctl -w net.ipv4.tcp_keepalive_probes=10
 
-# Increase connection limits
-sysctl -w net.core.somaxconn=65535
-sysctl -w net.ipv4.tcp_max_syn_backlog=8192
-sysctl -w net.core.netdev_max_backlog=5000
-sysctl -w net.ipv4.tcp_max_tw_buckets=200000
+    # Increase connection limits
+    sysctl -w net.core.somaxconn=65535
+    sysctl -w net.ipv4.tcp_max_syn_backlog=8192
+    sysctl -w net.core.netdev_max_backlog=5000
+    sysctl -w net.ipv4.tcp_max_tw_buckets=200000
 
-# Enhance BBR for streaming and downloading
-sysctl -w net.core.default_qdisc=fq_codel # Use fq_codel for lower latency
-if sysctl -w net.ipv4.tcp_congestion_control=bbr 2>/dev/null; then
-    echo "BBR successfully enabled."
-else
-    echo "BBR not supported, attempting to enable BBRv2..."
-    # Attempt to use BBRv2 (requires modern kernel)
-    modprobe tcp_bbr
-    sysctl -w net.ipv4.tcp_congestion_control=bbr
-fi
+    # Enhance BBR for streaming and downloading
+    sysctl -w net.core.default_qdisc=fq_codel
+    if sysctl -w net.ipv4.tcp_congestion_control=bbr 2>/dev/null; then
+        echo "BBR successfully enabled."
+    else
+        echo "BBR not supported, attempting to enable BBRv2..."
+        modprobe tcp_bbr
+        sysctl -w net.ipv4.tcp_congestion_control=bbr
+    fi
 
-# Additional settings for low latency and streaming optimization
-sysctl -w net.ipv4.tcp_low_latency=1
-sysctl -w net.ipv4.tcp_window_scaling=1
-sysctl -w net.ipv4.tcp_sack=1
-sysctl -w net.ipv4.tcp_no_metrics_save=0
-sysctl -w net.ipv4.tcp_ecn=1 # Enable ECN for congestion control
-sysctl -w net.ipv4.tcp_adv_win_scale=1
-sysctl -w net.ipv4.tcp_moderate_rcvbuf=1
+    # Additional settings for low latency and streaming
+    sysctl -w net.ipv4.tcp_low_latency=1
+    sysctl -w net.ipv4.tcp_window_scaling=1
+    sysctl -w net.ipv4.tcp_sack=1
+    sysctl -w net.ipv4.tcp_no_metrics_save=0
+    sysctl -w net.ipv4.tcp_ecn=1
+    sysctl -w net.ipv4.tcp_adv_win_scale=1
+    sysctl -w net.ipv4.tcp_moderate_rcvbuf=1
 
-# Optimize TCP Fast Open
-sysctl -w net.ipv4.tcp_fastopen=3
+    # Optimize TCP Fast Open
+    sysctl -w net.ipv4.tcp_fastopen=3
 
-# Optimize MTU and MSS
-sysctl -w net.ipv4.tcp_mtu_probing=1
-sysctl -w net.ipv4.tcp_base_mss=1024
+    # Optimize MTU and MSS
+    sysctl -w net.ipv4.tcp_mtu_probing=1
+    sysctl -w net.ipv4.tcp_base_mss=1024
 
-# Optimize TCP buffers for streaming and downloading
-sysctl -w net.ipv4.tcp_rmem='4096 87380 8388608' # Increased for high bandwidth
-sysctl -w net.ipv4.tcp_wmem='4096 16384 8388608'
-sysctl -w net.core.rmem_max=16777216
-sysctl -w net.core.wmem_max=16777216
+    # Optimize TCP buffers
+    sysctl -w net.ipv4.tcp_rmem='4096 87380 8388608'
+    sysctl -w net.ipv4.tcp_wmem='4096 16384 8388608'
+    sysctl -w net.core.rmem_max=16777216
+    sysctl -w net.core.wmem_max=16777216
 
-# Save settings to /etc/sysctl.conf
-echo "Saving settings to /etc/sysctl.conf..."
-cat <<EOT > /etc/sysctl.conf
+    # Save settings to /etc/sysctl.conf
+    echo "Saving settings to /etc/sysctl.conf..."
+    cat <<EOT > /etc/sysctl.conf
 net.ipv4.tcp_keepalive_time=300
 net.ipv4.tcp_keepalive_intvl=60
 net.ipv4.tcp_keepalive_probes=10
@@ -115,45 +114,195 @@ net.core.rmem_max=16777216
 net.core.wmem_max=16777216
 EOT
 
-# Apply sysctl settings
-sysctl -p
+    # Apply sysctl settings
+    sysctl -p
 
-# Set CPU and IO priority for ReverseTlsTunnel service
-echo "Setting CPU and IO priority for ReverseTlsTunnel service..."
-systemctl set-property rtt.service CPUSchedulingPolicy=rr IOSchedulingPriority=2 2>/dev/null
-if [ $? -ne 0 ]; then
-    echo "Error setting priority for rtt service. Please check if the rtt service exists."
-fi
+    # Set CPU and IO priority for ReverseTlsTunnel service
+    echo "Setting CPU and IO priority for ReverseTlsTunnel service..."
+    systemctl set-property rtt.service CPUSchedulingPolicy=rr IOSchedulingPriority=2 2>/dev/null
+    if [ $? -ne 0 ]; then
+        echo "Error setting priority for rtt service. Please check if the rtt service exists."
+    fi
 
-# Configure Traffic Shaping for streaming
-echo "Configuring Traffic Shaping with rate $TRAFFIC_RATE..."
-tc qdisc add dev $INTERFACE root handle 1: htb default 10
-tc class add dev $INTERFACE parent 1: classid 1:10 htb rate $TRAFFIC_RATE
-tc qdisc add dev $INTERFACE parent 1:10 handle 10: fq_codel
-if [ $? -eq 0 ]; then
-    echo "Traffic Shaping successfully configured."
-else
-    echo "Error configuring Traffic Shaping! Please check tc configuration."
-fi
+    # Configure Traffic Shaping
+    echo "Configuring Traffic Shaping with rate $TRAFFIC_RATE..."
+    tc qdisc add dev $INTERFACE root handle 1: htb default 10
+    tc class add dev $INTERFACE parent 1: classid 1:10 htb rate $TRAFFIC_RATE
+    tc qdisc add dev $INTERFACE parent 1:10 handle 10: fq_codel
+    if [ $? -eq 0 ]; then
+        echo "Traffic Shaping successfully configured."
+    else
+        echo "Error configuring Traffic Shaping! Please check tc configuration."
+    fi
 
-# Prioritize HTTPS traffic (port 443) for streaming
-tc filter add dev $INTERFACE protocol ip parent 1: prio 1 u32 match ip dport 443 0xffff flowid 1:10
-tc filter add dev $INTERFACE protocol ip parent 1: prio 1 u32 match ip sport 443 0xffff flowid 1:10
+    # Prioritize HTTPS traffic (port 443)
+    tc filter add dev $INTERFACE protocol ip parent 1: prio 1 u32 match ip dport 443 0xffff flowid 1:10
+    tc filter add dev $INTERFACE protocol ip parent 1: prio 1 u32 match ip sport 443 0xffff flowid 1:10
 
-# Configure firewall (ufw)
-echo "Configuring firewall to allow ports 22 and 443..."
-ufw allow 22
-ufw allow 443
-ufw --force enable
+    # Configure firewall (ufw)
+    echo "Configuring firewall to allow ports 22 and 443..."
+    ufw allow 22
+    ufw allow 443
+    ufw --force enable
 
-# Install and check Netdata for monitoring
-if ! command -v netdata &> /dev/null; then
-    echo "Installing Netdata for real-time monitoring..."
-    bash <(curl -Ss https://my-netdata.io/kickstart.sh) --dont-wait
-else
-    echo "Netdata is already installed."
-fi
+    # Set default DNS
+    echo "Setting default DNS servers ($DEFAULT_DNS1, $DEFAULT_DNS2)..."
+    echo "nameserver $DEFAULT_DNS1" > /etc/resolv.conf
+    echo "nameserver $DEFAULT_DNS2" >> /etc/resolv.conf
 
-echo "Settings applied successfully!"
-echo "Check Netdata at http://<your-server-ip>:19999 for monitoring."
-echo "To test ping and speed, use commands like ping and iperf3."
+    # Install Netdata for monitoring
+    if ! command -v netdata &> /dev/null; then
+        echo "Installing Netdata for real-time monitoring..."
+        bash <(curl -Ss https://my-netdata.io/kickstart.sh) --dont-wait
+    else
+        echo "Netdata is already installed."
+    fi
+
+    echo "BBR VIP optimizations installed successfully!"
+}
+
+# Function to uninstall optimizations
+uninstall_optimizations() {
+    echo "Uninstalling BBR VIP optimizations..."
+
+    # Restore original sysctl.conf
+    if [ -f "$SYSCTL_BACKUP" ]; then
+        echo "Restoring original /etc/sysctl.conf..."
+        cp "$SYSCTL_BACKUP" /etc/sysctl.conf
+        sysctl -p
+    else
+        echo "No backup of sysctl.conf found! Resetting to minimal defaults..."
+        > /etc/sysctl.conf
+        sysctl -p
+    fi
+
+    # Reset MTU to default (1500)
+    echo "Resetting MTU to 1500 for interface $INTERFACE..."
+    ip link set dev $INTERFACE mtu 1500
+
+    # Remove Traffic Shaping
+    echo "Removing Traffic Shaping configuration..."
+    tc qdisc del dev $INTERFACE root 2>/dev/null
+
+    # Reset firewall
+    echo "Resetting firewall rules..."
+    ufw --force reset
+    ufw --force enable
+
+    # Reset DNS to system defaults
+    echo "Resetting DNS to system defaults..."
+    echo "" > /etc/resolv.conf
+
+    # Remove Netdata (optional, prompt user)
+    read -p "Do you want to uninstall Netdata? (y/n): " netdata_choice
+    if [[ "$netdata_choice" == "y" || "$netdata_choice" == "Y" ]]; then
+        echo "Uninstalling Netdata..."
+        systemctl stop netdata
+        apt-get remove --purge netdata -y 2>/dev/null || yum remove netdata -y 2>/dev/null
+    fi
+
+    echo "Optimizations uninstalled successfully!"
+}
+
+# Function to show status
+show_status() {
+    echo "Checking system status..."
+
+    # Check rtt service status
+    if systemctl is-active rtt.service >/dev/null 2>&1; then
+        echo "ReverseTlsTunnel (rtt) service: Active"
+    else
+        echo "ReverseTlsTunnel (rtt) service: Inactive or not found"
+    fi
+
+    # Check current MTU
+    CURRENT_MTU=$(ip link show $INTERFACE | grep -oP 'mtu \K\d+')
+    echo "Current MTU: $CURRENT_MTU"
+
+    # Check congestion control
+    CURRENT_BBR=$(sysctl -n net.ipv4.tcp_congestion_control)
+    echo "TCP Congestion Control: $CURRENT_BBR"
+
+    # Check DNS servers
+    echo "Current DNS servers:"
+    cat /etc/resolv.conf | grep nameserver || echo "No DNS servers configured."
+
+    # Check Netdata status
+    if command -v netdata &> /dev/null && systemctl is-active netdata >/dev/null 2>&1; then
+        echo "Netdata: Running (Access at http://<your-server-ip>:19999)"
+    else
+        echo "Netdata: Not installed or not running"
+    fi
+}
+
+# Function to change MTU
+change_mtu() {
+    echo "Current MTU: $(ip link show $INTERFACE | grep -oP 'mtu \K\d+')"
+    read -p "Enter new MTU value (between 1280 and 1500, default $DEFAULT_MTU): " CUSTOM_MTU
+    if [[ "$CUSTOM_MTU" =~ ^[0-9]+$ && "$CUSTOM_MTU" -ge 1280 && "$CUSTOM_MTU" -le 1500 ]]; then
+        ip link set dev $INTERFACE mtu $CUSTOM_MTU
+        echo "MTU set to $CUSTOM_MTU."
+    else
+        echo "Invalid MTU value! Keeping current MTU."
+    fi
+}
+
+# Function to change DNS
+change_dns() {
+    echo "Current DNS servers:"
+    cat /etc/resolv.conf | grep nameserver || echo "No DNS servers configured."
+    echo "Default DNS servers: $DEFAULT_DNS1, $DEFAULT_DNS2"
+    read -p "Do you want to change DNS servers? (y/n): " dns_choice
+    if [[ "$dns_choice" == "y" || "$dns_choice" == "Y" ]]; then
+        read -p "Enter first DNS server: " DNS1
+        read -p "Enter second DNS server (optional): " DNS2
+        if [[ -n "$DNS1" ]]; then
+            echo "nameserver $DNS1" > /etc/resolv.conf
+            if [[ -n "$DNS2" ]]; then
+                echo "nameserver $DNS2" >> /etc/resolv.conf
+            fi
+            echo "DNS servers updated successfully."
+        else
+            echo "No valid DNS server provided! Keeping current configuration."
+        fi
+    else
+        echo "Applying default DNS servers ($DEFAULT_DNS1, $DEFAULT_DNS2)..."
+        echo "nameserver $DEFAULT_DNS1" > /etc/resolv.conf
+        echo "nameserver $DEFAULT_DNS2" >> /etc/resolv.conf
+    fi
+}
+
+# Function to reboot server
+reboot_server() {
+    read -p "Are you sure you want to reboot the server? (y/n): " reboot_choice
+    if [[ "$reboot_choice" == "y" || "$reboot_choice" == "Y" ]]; then
+        echo "Rebooting server..."
+        reboot
+    else
+        echo "Reboot canceled."
+    fi
+}
+
+# Menu
+while true; do
+    echo -e "\n=== BBR VIP By Parham Pahlevan ==="
+    echo "1. Install BBR VIP By Parham Pahlevan"
+    echo "2. Uninstall optimizations"
+    echo "3. Show status"
+    echo "4. Change MTU"
+    echo "5. Change DNS"
+    echo "6. Reboot"
+    echo "7. Exit"
+    read -p "Select an option [1-7]: " option
+
+    case $option in
+        1) install_optimizations ;;
+        2) uninstall_optimizations ;;
+        3) show_status ;;
+        4) change_mtu ;;
+        5) change_dns ;;
+        6) reboot_server ;;
+        7) echo "Exiting..."; exit 0 ;;
+        *) echo "Invalid option! Please select a number between 1 and 7." ;;
+    esac
+done
