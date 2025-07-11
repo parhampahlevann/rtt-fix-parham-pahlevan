@@ -1,9 +1,10 @@
 #!/bin/bash
 set -e
 
-echo "🔧 Installing ReverseTlsTunnel (Optimized for ARM64)"
+echo "🔧 Installing ReverseTlsTunnel (RTT) - Cross Platform Installer"
 
-sudo apt update -y && sudo apt install -y curl wget unzip socat jq systemd
+# Requirements
+sudo apt update -y && sudo apt install -y curl wget unzip file jq systemd || true
 
 INSTALL_DIR="/opt/reversetlstunnel"
 BIN_NAME="rtt"
@@ -11,20 +12,31 @@ SERVICE_NAME="rtt"
 SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
 CONFIG_FILE="$INSTALL_DIR/config.env"
 
-# Use verified ARM64 binary from direct host
-BIN_URL="https://dl.parham.run/rtt-linux-arm64.zip"
-
-sudo mkdir -p "$INSTALL_DIR"
+mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
 
-echo "⬇️ Downloading RTT binary from $BIN_URL..."
-wget -q "$BIN_URL" -O rtt.zip || { echo "❌ Failed to download binary"; exit 1; }
+# Detect Architecture
+ARCH=$(uname -m)
+case "$ARCH" in
+  x86_64) ARCH_DL="amd64" ;;
+  aarch64 | arm64) ARCH_DL="arm64" ;;
+  armv7l) ARCH_DL="armv7" ;;
+  i386 | i686) ARCH_DL="386" ;;
+  *) echo "❌ Unsupported architecture: $ARCH"; exit 1 ;;
+esac
+
+BIN_URL="https://dl.parham.run/rtt-linux-$ARCH_DL.zip"
+echo "📥 Downloading RTT binary for $ARCH_DL..."
+wget -q "$BIN_URL" -O rtt.zip || { echo "❌ Failed to download binary from $BIN_URL"; exit 1; }
+
 unzip -o rtt.zip
 chmod +x "$BIN_NAME"
 
+# Check binary format
 file "$BIN_NAME" | grep -q "ELF" || { echo "❌ Invalid RTT binary format."; exit 1; }
 
-echo "⚙️ Writing config.env..."
+# Write config
+echo "⚙️ Generating config.env..."
 cat <<EOF | sudo tee "$CONFIG_FILE" > /dev/null
 REMOTE_HOST=your.server.ip
 REMOTE_PORT=443
@@ -34,15 +46,16 @@ RECONNECT_DELAY=5
 MAX_RETRIES=0
 EOF
 
-# Generate final ExecStart with or without compression
+# Load config to prepare flags
 source "$CONFIG_FILE"
 EXTRA_FLAGS=""
 [[ "$USE_COMPRESSION" == "true" ]] && EXTRA_FLAGS="-z"
 
+# Generate systemd service
 echo "🔧 Creating systemd service..."
 cat <<EOF | sudo tee "$SERVICE_FILE" > /dev/null
 [Unit]
-Description=Reverse TLS Tunnel (ARM64)
+Description=Reverse TLS Tunnel (Cross-Platform)
 After=network-online.target
 Wants=network-online.target
 
@@ -58,8 +71,9 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
+# Enable and start service
 sudo systemctl daemon-reload
 sudo systemctl enable "$SERVICE_NAME"
 sudo systemctl restart "$SERVICE_NAME"
 
-echo -e "\n✅ RTT installed and running on ARM64 system!"
+echo -e "\n✅ RTT installed and running on $ARCH system!"
