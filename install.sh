@@ -1,7 +1,9 @@
 #!/bin/bash
 set -e
 
-# 🔧 نصب بهینه ReverseTlsTunnel - نسخه بدون وابستگی به API
+echo "🔧 Installing ReverseTlsTunnel (RTT) v1.4.2"
+
+# Configuration
 VERSION="v1.4.2"
 BASE_URL="https://github.com/levindoneto/ReverseTlsTunnel/releases/download/$VERSION"
 INSTALL_DIR="/opt/reversetlstunnel"
@@ -10,44 +12,55 @@ SERVICE_NAME="rtt"
 SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
 CONFIG_FILE="$INSTALL_DIR/config.env"
 
-# 📌 تشخیص معماری
+# Detect architecture
 ARCH=$(uname -m)
 case "$ARCH" in
   x86_64) ARCH_DL="amd64" ;;
   aarch64 | arm64) ARCH_DL="arm64" ;;
   armv7l | arm) ARCH_DL="arm" ;;
   i386 | i686) ARCH_DL="386" ;;
-  *) echo "❌ معماری پشتیبانی نمی‌شود: $ARCH" && exit 1 ;;
+  *)
+    echo "❌ Unsupported architecture: $ARCH"
+    exit 1
+    ;;
 esac
 
-# 📦 نصب پکیج‌های موردنیاز
-sudo apt update -y && sudo apt install -y curl wget unzip file systemd || true
+# Install required packages
+echo "📦 Installing required packages..."
+sudo apt update -y && sudo apt install -y wget unzip file systemd || {
+  echo "❌ Failed to install dependencies"
+  exit 1
+}
 
-# 📁 آماده‌سازی مسیر نصب
+# Prepare directory
+echo "📁 Creating install directory..."
 sudo mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
 
-# ⬇️ دانلود باینری مخصوص معماری
+# Download binary
 BIN_URL="$BASE_URL/rtt-linux-$ARCH_DL.zip"
-echo "📥 در حال دانلود باینری RTT برای $ARCH_DL از:"
+echo "📥 Downloading RTT binary from:"
 echo "$BIN_URL"
 
 wget -q "$BIN_URL" -O rtt.zip || {
-  echo "❌ خطا در دانلود فایل از GitHub. لطفاً اتصال اینترنت را بررسی کنید."
+  echo "❌ Failed to download RTT binary. Please check internet connection or GitHub availability."
   exit 1
 }
 
-unzip -o rtt.zip
+# Unzip and validate
+echo "📦 Extracting RTT binary..."
+unzip -o rtt.zip > /dev/null || {
+  echo "❌ Failed to unzip RTT binary."
+  exit 1
+}
 chmod +x "$BIN_NAME"
-
-# 🧪 بررسی فرمت فایل
 file "$BIN_NAME" | grep -q "ELF" || {
-  echo "❌ فایل دانلود شده معتبر نیست یا خراب شده."
+  echo "❌ The downloaded binary is not a valid ELF executable."
   exit 1
 }
 
-# ⚙️ ساخت فایل config.env
-echo "⚙️ نوشتن config.env"
+# Generate config.env
+echo "🛠️ Writing config.env..."
 cat <<EOF | sudo tee "$CONFIG_FILE" > /dev/null
 REMOTE_HOST=your.server.ip
 REMOTE_PORT=443
@@ -57,13 +70,13 @@ RECONNECT_DELAY=5
 MAX_RETRIES=0
 EOF
 
-# 📦 بارگذاری متغیرها
+# Load config to prepare command flags
 source "$CONFIG_FILE"
 EXTRA_FLAGS=""
 [[ "$USE_COMPRESSION" == "true" ]] && EXTRA_FLAGS="-z"
 
-# 🧩 ساخت سرویس systemd
-echo "🔧 ساخت سرویس systemd"
+# Create systemd service
+echo "🧩 Creating systemd service..."
 cat <<EOF | sudo tee "$SERVICE_FILE" > /dev/null
 [Unit]
 Description=Reverse TLS Tunnel (RTT)
@@ -82,9 +95,13 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
-# 🚀 فعال‌سازی سرویس
+# Enable & start service
+echo "🚀 Enabling and starting service..."
 sudo systemctl daemon-reload
 sudo systemctl enable "$SERVICE_NAME"
 sudo systemctl restart "$SERVICE_NAME"
 
-echo -e "\n✅ نصب RTT با موفقیت انجام شد! نسخه: $VERSION"
+# Final check
+sleep 1
+echo -e "\n✅ RTT has been installed and started successfully!"
+systemctl status "$SERVICE_NAME" --no-pager | head -n 10
