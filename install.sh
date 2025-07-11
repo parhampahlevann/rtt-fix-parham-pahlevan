@@ -1,9 +1,8 @@
 #!/bin/bash
 set -e
 
-echo "🔧 Installing ReverseTlsTunnel (RTT) - Universal Installer (GitHub Source)"
+echo "🔧 Installing ReverseTlsTunnel (RTT) - Universal GitHub Installer"
 
-# Install dependencies
 sudo apt update -y && sudo apt install -y curl wget unzip file jq systemd || true
 
 INSTALL_DIR="/opt/reversetlstunnel"
@@ -25,10 +24,19 @@ case "$ARCH" in
   *) echo "❌ Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
-# Build GitHub download URL
-BIN_URL="https://github.com/levindoneto/ReverseTlsTunnel/releases/latest/download/rtt-linux-$ARCH_DL.zip"
+# Get latest release tag from GitHub API
+REPO_API="https://api.github.com/repos/levindoneto/ReverseTlsTunnel/releases/latest"
+echo "🌐 Fetching latest release info from GitHub..."
+TAG=$(curl -s $REPO_API | jq -r .tag_name)
+if [[ "$TAG" == "null" || -z "$TAG" ]]; then
+  echo "❌ Could not fetch release tag from GitHub"
+  exit 1
+fi
 
-echo "📥 Downloading RTT binary for $ARCH_DL..."
+# Build correct download URL using tag
+BIN_URL="https://github.com/levindoneto/ReverseTlsTunnel/releases/download/$TAG/rtt-linux-$ARCH_DL.zip"
+
+echo "📥 Downloading RTT binary for $ARCH_DL from $BIN_URL"
 wget -q "$BIN_URL" -O rtt.zip || { echo "❌ Failed to download binary from $BIN_URL"; exit 1; }
 
 unzip -o rtt.zip
@@ -36,8 +44,8 @@ chmod +x "$BIN_NAME"
 
 file "$BIN_NAME" | grep -q "ELF" || { echo "❌ Invalid RTT binary format."; exit 1; }
 
-# Write default config
-echo "⚙️ Generating config.env..."
+# Generate config
+echo "⚙️ Writing config.env..."
 cat <<EOF | sudo tee "$CONFIG_FILE" > /dev/null
 REMOTE_HOST=your.server.ip
 REMOTE_PORT=443
@@ -56,7 +64,7 @@ EXTRA_FLAGS=""
 echo "🔧 Creating systemd service..."
 cat <<EOF | sudo tee "$SERVICE_FILE" > /dev/null
 [Unit]
-Description=Reverse TLS Tunnel (Cross-Platform)
+Description=Reverse TLS Tunnel (Auto GitHub)
 After=network-online.target
 Wants=network-online.target
 
@@ -72,9 +80,8 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
-# Enable & Start
 sudo systemctl daemon-reload
 sudo systemctl enable "$SERVICE_NAME"
 sudo systemctl restart "$SERVICE_NAME"
 
-echo -e "\n✅ RTT installed and running on $ARCH system using official GitHub binaries!"
+echo -e "\n✅ RTT successfully installed and running using latest release ($TAG)!"
