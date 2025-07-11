@@ -1,8 +1,8 @@
 #!/bin/bash
 # Optimization script for ReverseTlsTunnel on Ubuntu 22.04 with interactive menu
 # Goals: Reduce traffic, eliminate disconnections, lower ping, improve stability
-# Features: Install, Uninstall, Status, Manual MTU/DNS, Reboot option, Fix Permission Denied
-# Fixes: Reboot prompt issue, Service not running issue
+# Features: Install, Uninstall, Status, Manual MTU/DNS, Reboot option (menu and after install), Fix Permission Denied
+# Fixes: Netdata cloud.conf error, Reverse TLS not found, Service not running
 # Author: Optimized for ReverseTlsTunnel by Grok
 # License: MIT (shareable on GitHub)
 
@@ -34,7 +34,6 @@ check_permissions() {
 
 # Function to find ReverseTlsTunnel service name
 find_rtt_service() {
-  # Try to find service by checking common names
   local possible_names=("rtt" "reversetlstunnel" "reverse-tls-tunnel")
   for name in "${possible_names[@]}"; do
     if systemctl list-units --full -all | grep -q "$name"; then
@@ -44,6 +43,35 @@ find_rtt_service() {
   done
   echo ""
   return 1
+}
+
+# Function to reboot server
+reboot_server() {
+  echo -n "Would you like to reboot the server now? (y/n): "
+  read -r reboot_choice
+  if [ "$reboot_choice" = "y" ] || [ "$reboot_choice" = "Y" ]; then
+    echo "Rebooting server..." | tee -a "$LOG_FILE"
+    sleep 2 # Brief delay to ensure log is written
+    reboot
+  else
+    echo "Reboot skipped." | tee -a "$LOG_FILE"
+  fi
+}
+
+# Function to fix Netdata cloud.conf error
+fix_netdata_cloud() {
+  echo "Fixing Netdata cloud.conf issue..." | tee -a "$LOG_FILE"
+  # Create necessary directories
+  mkdir -p /var/lib/netdata/cloud.d /var/log/netdata /var/cache/netdata
+  chown -R netdata:netdata /var/lib/netdata /var/log/netdata /var/cache/netdata
+  chmod -R 770 /var/lib/netdata/cloud.d
+  # Create empty cloud.conf to suppress error
+  touch /var/lib/netdata/cloud.d/cloud.conf
+  chown netdata:netdata /var/lib/netdata/cloud.d/cloud.conf
+  chmod 660 /var/lib/netdata/cloud.d/cloud.conf
+  echo "[global]" > /var/lib/netdata/cloud.d/cloud.conf
+  echo "enabled = no" >> /var/lib/netdata/cloud.d/cloud.conf
+  echo "Netdata cloud.conf created and disabled." | tee -a "$LOG_FILE"
 }
 
 # Function to install optimizations
@@ -100,7 +128,14 @@ install_optimizations() {
   apt-get install -y netdata
   systemctl enable netdata
   systemctl start netdata
-  echo "Netdata installed. Access at http://$(hostname -I | awk '{print $1}'):19999" | tee -a "$LOG_FILE"
+  # Fix Netdata cloud.conf issue
+  fix_netdata_cloud
+  if systemctl is-active --quiet netdata; then
+    echo "Netdata installed and running. Access at http://$(hostname -I | awk '{print $1}'):19999" | tee -a "$LOG_FILE"
+  else
+    echo "Error: Netdata failed to start. Check /var/log/netdata/error.log" | tee -a "$LOG_FILE"
+    exit 1
+  fi
 
   # Optimize ReverseTlsTunnel service
   RTT_SERVICE=$(find_rtt_service)
@@ -115,10 +150,13 @@ install_optimizations() {
       echo "ReverseTlsTunnel service ($RTT_SERVICE) optimized and running." | tee -a "$LOG_FILE"
     else
       echo "Error: Failed to start ReverseTlsTunnel service ($RTT_SERVICE)." | tee -a "$LOG_FILE"
+      echo "Please ensure ReverseTlsTunnel is installed correctly. Check 'systemctl status $RTT_SERVICE' for details." | tee -a "$LOG_FILE"
       exit 1
     fi
   else
-    echo "Warning: ReverseTlsTunnel service not found. Please ensure it's installed." | tee -a "$LOG_FILE"
+    echo "Error: ReverseTlsTunnel service not found. Please install it first." | tee -a "$LOG_FILE"
+    echo "Run: wget https://raw.githubusercontent.com/radkesvat/ReverseTlsTunnel/master/scripts/install.sh -O install.sh && chmod +x install.sh && bash install.sh" | tee -a "$LOG_FILE"
+    exit 1
   fi
 
   # Apply traffic shaping
@@ -128,7 +166,7 @@ install_optimizations() {
 
   echo "Installation completed at $(date)" | tee -a "$LOG_FILE"
 
-  # Ask for reboot with proper input handling
+  # Ask for reboot after installation
   echo -n "Would you like to reboot the server now? (y/n): "
   read -r reboot_choice
   if [ "$reboot_choice" = "y" ] || [ "$reboot_choice" = "Y" ]; then
@@ -165,7 +203,8 @@ uninstall_optimizations() {
   if command -v netdata >/dev/null; then
     systemctl stop netdata
     apt-get purge -y netdata
-    echo "Removed netdata." | tee -a "$LOG_FILE"
+    rm -rf /var/lib/netdata /var/log/netdata /var/cache/netdata
+    echo "Removed netdata and its directories." | tee -a "$LOG_FILE"
   fi
 
   # Remove traffic shaping
@@ -241,7 +280,8 @@ while true; do
   echo "3. Show status"
   echo "4. Change MTU and DNS"
   echo "5. Exit"
-  read -p "Select an option [1-5]: " choice
+  echo "6. Reboot server"
+  read -p "Select an option [1-6]: " choice
 
   case $choice in
     1)
@@ -260,8 +300,11 @@ while true; do
       echo "Exiting..." | tee -a "$LOG_FILE"
       exit 0
       ;;
+    6)
+      reboot_server
+      ;;
     *)
-      echo "Invalid option. Please select 1-5."
+      echo "Invalid option. Please select 1-6."
       ;;
   esac
 done
