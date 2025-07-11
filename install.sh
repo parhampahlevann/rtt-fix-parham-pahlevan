@@ -2,6 +2,7 @@
 # Optimization script for ReverseTlsTunnel on Ubuntu 22.04 with interactive menu
 # Goals: Reduce traffic, eliminate disconnections, lower ping, improve stability
 # Features: Install, Uninstall, Status, Manual MTU/DNS, Reboot option, Fix Permission Denied
+# Fixes: Reboot prompt issue, Service not running issue
 # Author: Optimized for ReverseTlsTunnel by Grok
 # License: MIT (shareable on GitHub)
 
@@ -29,6 +30,20 @@ check_permissions() {
   if [ -f "$file" ] && [ ! -w "$file" ]; then
     chmod u+w "$file" 2>/dev/null || { echo "Error: Cannot modify $file (Permission Denied)" | tee -a "$LOG_FILE"; exit 1; }
   fi
+}
+
+# Function to find ReverseTlsTunnel service name
+find_rtt_service() {
+  # Try to find service by checking common names
+  local possible_names=("rtt" "reversetlstunnel" "reverse-tls-tunnel")
+  for name in "${possible_names[@]}"; do
+    if systemctl list-units --full -all | grep -q "$name"; then
+      echo "$name"
+      return 0
+    fi
+  done
+  echo ""
+  return 1
 }
 
 # Function to install optimizations
@@ -88,16 +103,22 @@ install_optimizations() {
   echo "Netdata installed. Access at http://$(hostname -I | awk '{print $1}'):19999" | tee -a "$LOG_FILE"
 
   # Optimize ReverseTlsTunnel service
-  if systemctl list-units | grep -q "rtt"; then
+  RTT_SERVICE=$(find_rtt_service)
+  if [ -n "$RTT_SERVICE" ]; then
     check_permissions "/etc/security/limits.conf"
     echo "* soft nofile 65535" >> /etc/security/limits.conf
     echo "* hard nofile 65535" >> /etc/security/limits.conf
-    systemctl set-property rtt.service CPUSchedulingPolicy=rr CPUSchedulingPriority=20 IOSchedulingClass=best-effort IOSchedulingPriority=2
+    systemctl set-property "$RTT_SERVICE".service CPUSchedulingPolicy=rr CPUSchedulingPriority=20 IOSchedulingClass=best-effort IOSchedulingPriority=2
     systemctl daemon-reload
-    systemctl restart rtt
-    echo "ReverseTlsTunnel service optimized." | tee -a "$LOG_FILE"
+    systemctl restart "$RTT_SERVICE"
+    if systemctl is-active --quiet "$RTT_SERVICE"; then
+      echo "ReverseTlsTunnel service ($RTT_SERVICE) optimized and running." | tee -a "$LOG_FILE"
+    else
+      echo "Error: Failed to start ReverseTlsTunnel service ($RTT_SERVICE)." | tee -a "$LOG_FILE"
+      exit 1
+    fi
   else
-    echo "Warning: ReverseTlsTunnel service not found." | tee -a "$LOG_FILE"
+    echo "Warning: ReverseTlsTunnel service not found. Please ensure it's installed." | tee -a "$LOG_FILE"
   fi
 
   # Apply traffic shaping
@@ -107,10 +128,12 @@ install_optimizations() {
 
   echo "Installation completed at $(date)" | tee -a "$LOG_FILE"
 
-  # Ask for reboot
-  read - Buddhism: System: پ "Would you like to reboot the server now? (y/n): " reboot_choice
+  # Ask for reboot with proper input handling
+  echo -n "Would you like to reboot the server now? (y/n): "
+  read -r reboot_choice
   if [ "$reboot_choice" = "y" ] || [ "$reboot_choice" = "Y" ]; then
     echo "Rebooting server..." | tee -a "$LOG_FILE"
+    sleep 2 # Brief delay to ensure log is written
     reboot
   else
     echo "Reboot skipped." | tee -a "$LOG_FILE"
@@ -156,11 +179,12 @@ uninstall_optimizations() {
   fi
 
   # Reset rtt service optimizations
-  if systemctl list-units | grep -q "rtt"; then
-    systemctl set-property rtt.service CPUSchedulingPolicy=other CPUSchedulingPriority=0 IOSchedulingClass=idle IOSchedulingPriority=7
+  RTT_SERVICE=$(find_rtt_service)
+  if [ -n "$RTT_SERVICE" ]; then
+    systemctl set-property "$RTT_SERVICE".service CPUSchedulingPolicy=other CPUSchedulingPriority=0 IOSchedulingClass=idle IOSchedulingPriority=7
     systemctl daemon-reload
-    systemctl restart rtt
-    echo "Reset ReverseTlsTunnel service settings." | tee -a "$LOG_FILE"
+    systemctl restart "$RTT_SERVICE"
+    echo "Reset ReverseTlsTunnel service ($RTT_SERVICE) settings." | tee -a "$LOG_FILE"
   fi
 
   echo "Uninstallation completed at $(date)" | tee -a "$LOG_FILE"
@@ -178,8 +202,13 @@ show_status() {
   ufw status 2>/dev/null || echo "ufw not installed."
   echo "Netdata Status:"
   systemctl status netdata --no-pager 2>/dev/null || echo "Netdata not installed."
-  echo "ReverseTlsTunnel Service:"
-  systemctl status rtt --no-pager 2>/dev/null || echo "ReverseTlsTunnel not running."
+  RTT_SERVICE=$(find_rtt_service)
+  if [ -n "$RTT_SERVICE" ]; then
+    echo "ReverseTlsTunnel Service ($RTT_SERVICE):"
+    systemctl status "$RTT_SERVICE" --no-pager 2>/dev/null || echo "ReverseTlsTunnel not running."
+  else
+    echo "ReverseTlsTunnel Service: Not found."
+  fi
   echo "Current MTU (eth0): $(ip link show eth0 | grep mtu | awk '{print $5}')"
   echo "Current DNS: $(cat /etc/resolv.conf | grep nameserver)"
   echo "-------------------" | tee -a "$LOG_FILE"
