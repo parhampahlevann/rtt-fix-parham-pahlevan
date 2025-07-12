@@ -56,15 +56,19 @@ set_dns() {
 
     if systemctl is-active systemd-resolved >/dev/null 2>&1; then
         echo "System uses systemd-resolved. Updating DNS via resolved.conf..."
-        echo "[Resolve]" > /etc/systemd/resolved.conf
-        echo "DNS=$DEFAULT_DNS1 $DEFAULT_DNS2" >> /etc/systemd/resolved.conf
-        echo "FallbackDNS=$FALLBACK_DNS" >> /etc/systemd/resolved.conf
+        cat <<EOT > /etc/systemd/resolved.conf
+[Resolve]
+DNS=$DEFAULT_DNS1 $DEFAULT_DNS2
+FallbackDNS=$FALLBACK_DNS
+EOT
         systemctl restart systemd-resolved
         ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
     else
         echo "Setting DNS directly in /etc/resolv.conf..."
-        echo "nameserver $DEFAULT_DNS1" > /etc/resolv.conf
-        echo "nameserver $DEFAULT_DNS2" >> /etc/resolv.conf
+        cat <<EOT > /etc/resolv.conf
+nameserver $DEFAULT_DNS1
+nameserver $DEFAULT_DNS2
+EOT
     fi
 }
 
@@ -75,14 +79,18 @@ set_fallback_dns() {
 
     if systemctl is-active systemd-resolved >/dev/null 2>&1; then
         echo "System uses systemd-resolved. Updating DNS via resolved.conf..."
-        echo "[Resolve]" > /etc/systemd/resolved.conf
-        echo "DNS=$FALLBACK_DNS" >> /etc/systemd/resolved.conf
-        echo "FallbackDNS=1.1.1.1 8.8.8.8" >> /etc/systemd/resolved.conf
+        cat <<EOT > /etc/systemd/resolved.conf
+[Resolve]
+DNS=$FALLBACK_DNS
+FallbackDNS=1.1.1.1 8.8.8.8
+EOT
         systemctl restart systemd-resolved
         ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
     else
         echo "Setting fallback DNS in /etc/resolv.conf..."
-        echo "nameserver $FALLBACK_DNS" > /etc/resolv.conf
+        cat <<EOT > /etc/resolv.conf
+nameserver $FALLBACK_DNS
+EOT
     fi
 }
 
@@ -308,4 +316,93 @@ show_status() {
 
     # Network diagnostics suggestions
     echo "Network diagnostics suggestions:"
-    echo "1. Run 'iperf3 -c iperf.he.net' to test
+    echo "1. Run 'iperf3 -c iperf.he.net' to test bandwidth (install with 'sudo apt install iperf3' or 'sudo yum install iperf3')."
+    echo "2. Run 'mtr -c 10 8.8.8.8' to check packet loss and latency (install with 'sudo apt install mtr' or 'sudo yum install mtr')."
+}
+
+# Function to change MTU
+change_mtu() {
+    echo "Current MTU: $(ip link show "$INTERFACE" | grep -oP 'mtu \K\d+' || echo "Unknown")"
+    read -p "Enter new MTU value (between 1280 and 1500, default $DEFAULT_MTU): " CUSTOM_MTU
+    if [[ "$CUSTOM_MTU" =~ ^[0-9]+$ && "$CUSTOM_MTU" -ge 1280 && "$CUSTOM_MTU" -le 1500 ]]; then
+        ip link set dev "$INTERFACE" mtu $CUSTOM_MTU
+        if [ $? -eq 0 ]; then
+            echo "MTU set to $CUSTOM_MTU."
+        else
+            echo "Error setting MTU! Please check the network interface or permissions."
+        fi
+    else
+        echo "Invalid MTU value! Keeping current MTU."
+    fi
+}
+
+# Function to change DNS
+change_dns() {
+    echo "Current DNS servers:"
+    cat /etc/resolv.conf | grep nameserver || echo "No DNS servers configured."
+    echo "Default DNS servers: $DEFAULT_DNS1, $DEFAULT_DNS2"
+    read -p "Do you want to change DNS servers? (y/n): " dns_choice
+    if [[ "$dns_choice" == "y" || "$dns_choice" == "Y" ]]; then
+        echo "Backing up current DNS settings..."
+        cp /etc/resolv.conf /etc/resolv.conf.bak 2>/dev/null || echo "No existing /etc/resolv.conf to backup."
+        read -p "Enter first DNS server: " DNS1
+        read -p "Enter second DNS server (optional): " DNS2
+        if [[ -n "$DNS1" ]]; then
+            if systemctl is-active systemd-resolved >/dev/null 2>&1; then
+                echo "System uses systemd-resolved. Updating DNS via resolved.conf..."
+                cat <<EOT > /etc/systemd/resolved.conf
+[Resolve]
+DNS=$DNS1${DNS2:+ $DNS2}
+FallbackDNS=$FALLBACK_DNS
+EOT
+                systemctl restart systemd-resolved
+                ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+            else
+                cat <<EOT > /etc/resolv.conf
+nameserver $DNS1
+${DNS2:+nameserver $DNS2}
+EOT
+            fi
+            echo "DNS servers updated successfully."
+        else
+            echo "No valid DNS server provided! Keeping current configuration."
+        fi
+    else
+        set_dns
+    fi
+}
+
+# Function to reboot server
+reboot_server() {
+    read -p "Are you sure you want to reboot the server? (y/n): " reboot_choice
+    if [[ "$reboot_choice" == "y" || "$reboot_choice" == "Y" ]]; then
+        echo "Syncing data and rebooting server..."
+        sync && reboot
+    else
+        echo "Reboot canceled."
+    fi
+}
+
+# Menu
+while true; do
+    echo -e "\n=== Ultimate BBRv2 By Parham Pahlevan ==="
+    echo "1. Install Ultimate BBRv2 By Parham Pahlevan"
+    echo "2. Uninstall all optimizations"
+    echo "3. Show status"
+    echo "4. Change MTU"
+    echo "5. Change DNS"
+    echo "6. Reboot"
+    echo "7. Exit"
+    read -p "Select an option [1-7]: " option
+
+    case $option in
+        1) install_optimizations ;;
+        2) uninstall_optimizations ;;
+        3) show_status ;;
+        4) change_mtu ;;
+        5) change_dns ;;
+        6) reboot_server ;;
+        7) echo "Exiting..."; exit 0 ;;
+        *) echo "Invalid option! Please select a number between 1 and 7." ;;
+    esac
+done
