@@ -10,6 +10,7 @@ fi
 DEFAULT_MTU=1420
 DEFAULT_DNS1="1.1.1.1" # Cloudflare DNS
 DEFAULT_DNS2="8.8.8.8" # Google DNS
+SYSCTL_CUSTOM="/etc/sysctl.d/99-bbr-ultimate.conf"
 
 # Function to check internet and DNS connectivity
 check_connectivity() {
@@ -26,8 +27,7 @@ check_connectivity() {
         echo "DNS resolution is working."
     else
         echo "DNS resolution failed! Setting fixed DNS servers ($DEFAULT_DNS1, $DEFAULT_DNS2)..."
-        echo "nameserver $DEFAULT_DNS1" > /etc/resolv.conf
-        echo "nameserver $DEFAULT_DNS2" >> /etc/resolv.conf
+        set_dns
         if nslookup youtube.com > /dev/null 2>&1; then
             echo "DNS resolution fixed."
         else
@@ -39,6 +39,25 @@ check_connectivity() {
             echo "4. Contact your ISP or network admin for assistance."
             exit 1
         fi
+    fi
+}
+
+# Function to set DNS
+set_dns() {
+    echo "Backing up current DNS settings..."
+    cp /etc/resolv.conf /etc/resolv.conf.bak 2>/dev/null || echo "No existing /etc/resolv.conf to backup."
+
+    if systemctl is-active systemd-resolved >/dev/null 2>&1; then
+        echo "System uses systemd-resolved. Updating DNS via resolved.conf..."
+        echo "[Resolve]" > /etc/systemd/resolved.conf
+        echo "DNS=$DEFAULT_DNS1 $DEFAULT_DNS2" >> /etc/systemd/resolved.conf
+        echo "FallbackDNS=1.1.1.1 8.8.8.8" >> /etc/systemd/resolved.conf
+        systemctl restart systemd-resolved
+        ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+    else
+        echo "Setting DNS directly in /etc/resolv.conf..."
+        echo "nameserver $DEFAULT_DNS1" > /etc/resolv.conf
+        echo "nameserver $DEFAULT_DNS2" >> /etc/resolv.conf
     fi
 }
 
@@ -100,50 +119,10 @@ install_optimizations() {
     # Apply TCP and network optimizations
     echo "Applying TCP optimizations for stable 4K streaming and low ping..."
 
-    # TCP Keepalive for connection stability
-    sysctl -w net.ipv4.tcp_keepalive_time=120
-    sysctl -w net.ipv4.tcp_keepalive_intvl=30
-    sysctl -w net.ipv4.tcp_keepalive_probes=8
-
-    # Increase connection limits
-    sysctl -w net.core.somaxconn=32768
-    sysctl -w net.ipv4.tcp_max_syn_backlog=8192
-    sysctl -w net.core.netdev_max_backlog=5000
-    sysctl -w net.ipv4.tcp_max_tw_buckets=65536
-
-    # Enable BBR or BBRv2
-    sysctl -w net.core.default_qdisc=fq
-    if modprobe tcp_bbr 2>/dev/null; then
-        if sysctl -w net.ipv4.tcp_congestion_control=bbr 2>/dev/null; then
-            echo "BBR or BBRv2 successfully enabled."
-        else
-            echo "BBR not supported. Falling back to cubic."
-            sysctl -w net.ipv4.tcp_congestion_control=cubic
-        fi
-    else
-        echo "BBR module not available. Falling back to cubic."
-        sysctl -w net.ipv4.tcp_congestion_control=cubic
-    fi
-
-    # Settings for low latency and stability
-    sysctl -w net.ipv4.tcp_low_latency=1
-    sysctl -w net.ipv4.tcp_window_scaling=1
-    sysctl -w net.ipv4.tcp_sack=1
-    sysctl -w net.ipv4.tcp_no_metrics_save=0
-    sysctl -w net.ipv4.tcp_ecn=0
-    sysctl -w net.ipv4.tcp_mtu_probing=1
-    sysctl -w net.ipv4.tcp_base_mss=1024
-    sysctl -w net.ipv4.tcp_fastopen=3
-
-    # Optimize TCP buffers for stability
-    sysctl -w net.ipv4.tcp_rmem='4096 87380 6291456'
-    sysctl -w net.ipv4.tcp_wmem='4096 16384 6291456'
-    sysctl -w net.core.rmem_max=8388608
-    sysctl -w net.core.wmem_max=8388608
-
-    # Save settings to /etc/sysctl.conf
-    echo "Saving settings to /etc/sysctl.conf..."
-    cat <<EOT > /etc/sysctl.conf
+    # Write sysctl settings to custom file
+    echo "Saving settings to $SYSCTL_CUSTOM..."
+    cat <<EOT > $SYSCTL_CUSTOM
+# Ultimate BBRv2 by Parham Pahlevan
 net.ipv4.tcp_keepalive_time=120
 net.ipv4.tcp_keepalive_intvl=30
 net.ipv4.tcp_keepalive_probes=8
@@ -167,13 +146,28 @@ net.core.rmem_max=8388608
 net.core.wmem_max=8388608
 EOT
 
+    # Load BBR module
+    if modprobe tcp_bbr 2>/dev/null; then
+        echo "BBR module loaded successfully."
+    else
+        echo "BBR module not available. Falling back to cubic."
+    fi
+
     # Apply sysctl settings
-    sysctl -p >/dev/null
+    sysctl --system >/dev/null
     if [ $? -eq 0 ]; then
         echo "Sysctl settings applied successfully."
     else
-        echo "Error applying sysctl settings! Please check /etc/sysctl.conf."
+        echo "Error applying sysctl settings! Please check $SYSCTL_CUSTOM."
         exit 1
+    fi
+
+    # Verify congestion control
+    CURRENT_BBR=$(sysctl -n net.ipv4.tcp_congestion_control || echo "Unknown")
+    if [ "$CURRENT_BBR" != "bbr" ]; then
+        echo "Warning: BBR not enabled, using $CURRENT_BBR."
+    else
+        echo "BBR or BBRv2 successfully enabled."
     fi
 
     # Set CPU and IO priority for ReverseTlsTunnel service
@@ -188,9 +182,7 @@ EOT
     ufw disable 2>/dev/null || echo "ufw not installed, skipping."
 
     # Set fixed DNS
-    echo "Setting fixed DNS servers ($DEFAULT_DNS1, $DEFAULT_DNS2)..."
-    echo "nameserver $DEFAULT_DNS1" > /etc/resolv.conf
-    echo "nameserver $DEFAULT_DNS2" >> /etc/resolv.conf
+    set_dns
 
     # TCP_NODELAY recommendation
     echo "Note: For TCP-based services (e.g., rtt), enable TCP_NODELAY to reduce latency."
@@ -204,22 +196,27 @@ EOT
 uninstall_optimizations() {
     echo "Uninstalling all optimizations..."
 
-    # Restore original sysctl.conf or clear it
-    if [ -f "$SYSCTL_BACKUP" ] && [ -s "$SYSCTL_BACKUP" ]; then
-        echo "Restoring original /etc/sysctl.conf..."
-        cp "$SYSCTL_BACKUP" /etc/sysctl.conf
-        sysctl -p >/dev/null
+    # Remove custom sysctl file
+    if [ -f "$SYSCTL_CUSTOM" ]; then
+        echo "Removing custom sysctl file $SYSCTL_CUSTOM..."
+        rm -f "$SYSCTL_CUSTOM"
+        sysctl --system >/dev/null
         if [ $? -eq 0 ]; then
-            echo "Sysctl settings restored successfully."
+            echo "Sysctl settings reset successfully."
         else
-            echo "Error restoring sysctl settings! Clearing /etc/sysctl.conf..."
-            > /etc/sysctl.conf
-            sysctl -p >/dev/null
+            echo "Error resetting sysctl settings! Please check manually."
         fi
     else
-        echo "No valid backup of sysctl.conf found! Clearing /etc/sysctl.conf..."
-        > /etc/sysctl.conf
-        sysctl -p >/dev/null
+        echo "No custom sysctl file found, skipping sysctl reset."
+    fi
+
+    # Reset congestion control to cubic
+    echo "Resetting TCP congestion control to cubic..."
+    sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null
+    if [ $? -eq 0 ]; then
+        echo "Congestion control reset to cubic."
+    else
+        echo "Error resetting congestion control!"
     fi
 
     # Reset MTU to default (1500)
@@ -238,10 +235,6 @@ uninstall_optimizations() {
         echo "Note: Could not reset priority for rtt service. Please check if the rtt service exists."
     fi
 
-    # Remove BBR module if loaded
-    echo "Removing BBR module if loaded..."
-    rmmod tcp_bbr 2>/dev/null || echo "BBR module not loaded, skipping."
-
     # Disable ufw
     echo "Disabling ufw..."
     ufw disable 2>/dev/null || echo "ufw not installed, skipping."
@@ -251,9 +244,17 @@ uninstall_optimizations() {
     if [ -f "/etc/resolv.conf.bak" ]; then
         cp /etc/resolv.conf.bak /etc/resolv.conf
         echo "Restored original DNS settings."
+        if systemctl is-active systemd-resolved >/dev/null 2>&1; then
+            systemctl restart systemd-resolved
+            ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+        fi
     else
+        echo "No DNS backup found, clearing /etc/resolv.conf..."
         echo "" > /etc/resolv.conf
-        echo "Cleared DNS settings to allow system defaults."
+        if systemctl is-active systemd-resolved >/dev/null 2>&1; then
+            systemctl restart systemd-resolved
+            ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+        fi
     fi
 
     echo "All optimizations uninstalled successfully!"
@@ -319,21 +320,30 @@ change_dns() {
     echo "Default DNS servers: $DEFAULT_DNS1, $DEFAULT_DNS2"
     read -p "Do you want to change DNS servers? (y/n): " dns_choice
     if [[ "$dns_choice" == "y" || "$dns_choice" == "Y" ]]; then
+        echo "Backing up current DNS settings..."
+        cp /etc/resolv.conf /etc/resolv.conf.bak 2>/dev/null || echo "No existing /etc/resolv.conf to backup."
         read -p "Enter first DNS server: " DNS1
         read -p "Enter second DNS server (optional): " DNS2
         if [[ -n "$DNS1" ]]; then
-            echo "nameserver $DNS1" > /etc/resolv.conf
-            if [[ -n "$DNS2" ]]; then
-                echo "nameserver $DNS2" >> /etc/resolv.conf
+            if systemctl is-active systemd-resolved >/dev/null 2>&1; then
+                echo "System uses systemd-resolved. Updating DNS via resolved.conf..."
+                echo "[Resolve]" > /etc/systemd/resolved.conf
+                echo "DNS=$DNS1${DNS2:+ $DNS2}" >> /etc/systemd/resolved.conf
+                echo "FallbackDNS=1.1.1.1 8.8.8.8" >> /etc/systemd/resolved.conf
+                systemctl restart systemd-resolved
+                ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+            else
+                echo "nameserver $DNS1" > /etc/resolv.conf
+                if [[ -n "$DNS2" ]]; then
+                    echo "nameserver $DNS2" >> /etc/resolv.conf
+                fi
             fi
             echo "DNS servers updated successfully."
         else
             echo "No valid DNS server provided! Keeping current configuration."
         fi
     else
-        echo "Applying default DNS servers ($DEFAULT_DNS1, $DEFAULT_DNS2)..."
-        echo "nameserver $DEFAULT_DNS1" > /etc/resolv.conf
-        echo "nameserver $DEFAULT_DNS2" >> /etc/resolv.conf
+        set_dns
     fi
 }
 
@@ -341,8 +351,8 @@ change_dns() {
 reboot_server() {
     read -p "Are you sure you want to reboot the server? (y/n): " reboot_choice
     if [[ "$reboot_choice" == "y" || "$reboot_choice" == "Y" ]]; then
-        echo "Rebooting server..."
-        reboot
+        echo "Syncing data and rebooting server..."
+        sync && reboot
     else
         echo "Reboot canceled."
     fi
