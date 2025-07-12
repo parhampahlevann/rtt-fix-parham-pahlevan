@@ -35,7 +35,8 @@ check_connectivity() {
             echo "Suggestions:"
             echo "1. Use a VPN to bypass potential ISP filtering."
             echo "2. Manually add YouTube IP to /etc/hosts (e.g., '142.250.190.14 youtube.com'). Use 'dig youtube.com' to get the latest IP."
-            echo "3. Contact your ISP or network admin for assistance."
+            echo "3. Try alternative DNS like Shecan (178.22.122.100) or Electro (78.157.42.100)."
+            echo "4. Contact your ISP or network admin for assistance."
             exit 1
         fi
     fi
@@ -84,7 +85,7 @@ fi
 
 # Function to install optimizations
 install_optimizations() {
-    echo "Installing Ultimate BBRv2 optimizations by Parham Pahlevan for jet-like speed and low ping..."
+    echo "Installing Ultimate BBRv2 optimizations by Parham Pahlevan for stable, high-speed, and low ping..."
 
     # Set fixed MTU
     echo "Setting fixed MTU to $DEFAULT_MTU for interface $INTERFACE..."
@@ -97,20 +98,20 @@ install_optimizations() {
     fi
 
     # Apply TCP and network optimizations
-    echo "Applying TCP optimizations for ultra-low ping and high-speed 4K streaming..."
+    echo "Applying TCP optimizations for stable 4K streaming and low ping..."
 
-    # TCP Keepalive for connection stability and low latency
-    sysctl -w net.ipv4.tcp_keepalive_time=100
-    sysctl -w net.ipv4.tcp_keepalive_intvl=25
+    # TCP Keepalive for connection stability
+    sysctl -w net.ipv4.tcp_keepalive_time=120
+    sysctl -w net.ipv4.tcp_keepalive_intvl=30
     sysctl -w net.ipv4.tcp_keepalive_probes=8
 
-    # Increase connection limits for high throughput
-    sysctl -w net.core.somaxconn=131072
-    sysctl -w net.ipv4.tcp_max_syn_backlog=16384
-    sysctl -w net.core.netdev_max_backlog=10000
-    sysctl -w net.ipv4.tcp_max_tw_buckets=262144
+    # Increase connection limits
+    sysctl -w net.core.somaxconn=32768
+    sysctl -w net.ipv4.tcp_max_syn_backlog=8192
+    sysctl -w net.core.netdev_max_backlog=5000
+    sysctl -w net.ipv4.tcp_max_tw_buckets=65536
 
-    # Enhance BBRv2 or BBR for streaming and downloading
+    # Enable BBR or BBRv2
     sysctl -w net.core.default_qdisc=fq
     if modprobe tcp_bbr 2>/dev/null; then
         if sysctl -w net.ipv4.tcp_congestion_control=bbr 2>/dev/null; then
@@ -124,40 +125,32 @@ install_optimizations() {
         sysctl -w net.ipv4.tcp_congestion_control=cubic
     fi
 
-    # Additional settings for ultra-low latency and high-speed streaming
+    # Settings for low latency and stability
     sysctl -w net.ipv4.tcp_low_latency=1
     sysctl -w net.ipv4.tcp_window_scaling=1
     sysctl -w net.ipv4.tcp_sack=1
     sysctl -w net.ipv4.tcp_no_metrics_save=0
-    sysctl -w net.ipv4.tcp_ecn=0  # Disable ECN for maximum compatibility
-    sysctl -w net.ipv4.tcp_adv_win_scale=1
-    sysctl -w net.ipv4.tcp_moderate_rcvbuf=1
-    sysctl -w net.ipv4.tcp_early_retrans=1  # Faster retransmission
-    sysctl -w net.ipv4.tcp_thin_linear_timeouts=1  # Optimize for unstable networks
-
-    # Optimize TCP Fast Open
-    sysctl -w net.ipv4.tcp_fastopen=3
-
-    # Optimize MTU and MSS
+    sysctl -w net.ipv4.tcp_ecn=0
     sysctl -w net.ipv4.tcp_mtu_probing=1
     sysctl -w net.ipv4.tcp_base_mss=1024
+    sysctl -w net.ipv4.tcp_fastopen=3
 
-    # Optimize TCP buffers for high-speed streaming
-    sysctl -w net.ipv4.tcp_rmem='8192 131072 12582912'
-    sysctl -w net.ipv4.tcp_wmem='8192 65536 12582912'
-    sysctl -w net.core.rmem_max=25165824
-    sysctl -w net.core.wmem_max=25165824
+    # Optimize TCP buffers for stability
+    sysctl -w net.ipv4.tcp_rmem='4096 87380 6291456'
+    sysctl -w net.ipv4.tcp_wmem='4096 16384 6291456'
+    sysctl -w net.core.rmem_max=8388608
+    sysctl -w net.core.wmem_max=8388608
 
     # Save settings to /etc/sysctl.conf
     echo "Saving settings to /etc/sysctl.conf..."
     cat <<EOT > /etc/sysctl.conf
-net.ipv4.tcp_keepalive_time=100
-net.ipv4.tcp_keepalive_intvl=25
+net.ipv4.tcp_keepalive_time=120
+net.ipv4.tcp_keepalive_intvl=30
 net.ipv4.tcp_keepalive_probes=8
-net.core.somaxconn=131072
-net.ipv4.tcp_max_syn_backlog=16384
-net.core.netdev_max_backlog=10000
-net.ipv4.tcp_max_tw_buckets=262144
+net.core.somaxconn=32768
+net.ipv4.tcp_max_syn_backlog=8192
+net.core.netdev_max_backlog=5000
+net.ipv4.tcp_max_tw_buckets=65536
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 net.ipv4.tcp_low_latency=1
@@ -165,17 +158,13 @@ net.ipv4.tcp_window_scaling=1
 net.ipv4.tcp_sack=1
 net.ipv4.tcp_no_metrics_save=0
 net.ipv4.tcp_ecn=0
-net.ipv4.tcp_adv_win_scale=1
-net.ipv4.tcp_moderate_rcvbuf=1
-net.ipv4.tcp_early_retrans=1
-net.ipv4.tcp_thin_linear_timeouts=1
-net.ipv4.tcp_fastopen=3
 net.ipv4.tcp_mtu_probing=1
 net.ipv4.tcp_base_mss=1024
-net.ipv4.tcp_rmem=8192 131072 12582912
-net.ipv4.tcp_wmem=8192 65536 12582912
-net.core.rmem_max=25165824
-net.core.wmem_max=25165824
+net.ipv4.tcp_fastopen=3
+net.ipv4.tcp_rmem=4096 87380 6291456
+net.ipv4.tcp_wmem=4096 16384 6291456
+net.core.rmem_max=8388608
+net.core.wmem_max=8388608
 EOT
 
     # Apply sysctl settings
@@ -204,24 +193,31 @@ EOT
     echo "nameserver $DEFAULT_DNS2" >> /etc/resolv.conf
 
     # TCP_NODELAY recommendation
-    echo "Note: For TCP-based services (e.g., rtt), enable TCP_NODELAY to further reduce latency."
+    echo "Note: For TCP-based services (e.g., rtt), enable TCP_NODELAY to reduce latency."
     echo "If you have access to the source code, use setsockopt(socket, IPPROTO_TCP, TCP_NODELAY, 1)."
     echo "Contact your application developer for guidance."
 
-    echo "Ultimate BBRv2 optimizations installed successfully for jet-like speed and low ping!"
+    echo "Optimizations installed successfully for stable, high-speed, and low ping!"
 }
 
 # Function to uninstall optimizations
 uninstall_optimizations() {
-    echo "Uninstalling BBRv2 optimizations..."
+    echo "Uninstalling all optimizations..."
 
-    # Restore original sysctl.conf
-    if [ -f "$SYSCTL_BACKUP" ]; then
+    # Restore original sysctl.conf or clear it
+    if [ -f "$SYSCTL_BACKUP" ] && [ -s "$SYSCTL_BACKUP" ]; then
         echo "Restoring original /etc/sysctl.conf..."
         cp "$SYSCTL_BACKUP" /etc/sysctl.conf
         sysctl -p >/dev/null
+        if [ $? -eq 0 ]; then
+            echo "Sysctl settings restored successfully."
+        else
+            echo "Error restoring sysctl settings! Clearing /etc/sysctl.conf..."
+            > /etc/sysctl.conf
+            sysctl -p >/dev/null
+        fi
     else
-        echo "No backup of sysctl.conf found! Resetting to minimal defaults..."
+        echo "No valid backup of sysctl.conf found! Clearing /etc/sysctl.conf..."
         > /etc/sysctl.conf
         sysctl -p >/dev/null
     fi
@@ -229,6 +225,22 @@ uninstall_optimizations() {
     # Reset MTU to default (1500)
     echo "Resetting MTU to 1500 for interface $INTERFACE..."
     ip link set dev "$INTERFACE" mtu 1500
+    if [ $? -eq 0 ]; then
+        echo "MTU reset to 1500."
+    else
+        echo "Error resetting MTU! Please check the network interface."
+    fi
+
+    # Reset CPU and IO priority for rtt service
+    echo "Resetting CPU and IO priority for ReverseTlsTunnel service..."
+    systemctl reset-property rtt.service CPUSchedulingPolicy IOSchedulingPriority 2>/dev/null
+    if [ $? -ne 0 ]; then
+        echo "Note: Could not reset priority for rtt service. Please check if the rtt service exists."
+    fi
+
+    # Remove BBR module if loaded
+    echo "Removing BBR module if loaded..."
+    rmmod tcp_bbr 2>/dev/null || echo "BBR module not loaded, skipping."
 
     # Disable ufw
     echo "Disabling ufw..."
@@ -236,9 +248,15 @@ uninstall_optimizations() {
 
     # Reset DNS to system defaults
     echo "Resetting DNS to system defaults..."
-    echo "" > /etc/resolv.conf
+    if [ -f "/etc/resolv.conf.bak" ]; then
+        cp /etc/resolv.conf.bak /etc/resolv.conf
+        echo "Restored original DNS settings."
+    else
+        echo "" > /etc/resolv.conf
+        echo "Cleared DNS settings to allow system defaults."
+    fi
 
-    echo "Optimizations uninstalled successfully!"
+    echo "All optimizations uninstalled successfully!"
 }
 
 # Function to show status
@@ -262,9 +280,9 @@ show_status() {
 
     # Check TCP Keepalive settings
     echo "TCP Keepalive settings:"
-    echo "  Keepalive Time: $(sysctl -n net.ipv4.tcp_keepalive_time) seconds"
-    echo "  Keepalive Interval: $(sysctl -n net.ipv4.tcp_keepalive_intvl) seconds"
-    echo "  Keepalive Probes: $(sysctl -n net.ipv4.tcp_keepalive_probes)"
+    echo "  Keepalive Time: $(sysctl -n net.ipv4.tcp_keepalive_time 2>/dev/null || echo "Unknown") seconds"
+    echo "  Keepalive Interval: $(sysctl -n net.ipv4.tcp_keepalive_intvl 2>/dev/null || echo "Unknown") seconds"
+    echo "  Keepalive Probes: $(sysctl -n net.ipv4.tcp_keepalive_probes 2>/dev/null || echo "Unknown")"
 
     # Check DNS servers
     echo "Current DNS servers:"
@@ -334,7 +352,7 @@ reboot_server() {
 while true; do
     echo -e "\n=== Ultimate BBRv2 By Parham Pahlevan ==="
     echo "1. Install Ultimate BBRv2 By Parham Pahlevan"
-    echo "2. Uninstall optimizations"
+    echo "2. Uninstall all optimizations"
     echo "3. Show status"
     echo "4. Change MTU"
     echo "5. Change DNS"
