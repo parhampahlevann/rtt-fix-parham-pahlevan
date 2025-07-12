@@ -11,38 +11,76 @@ DEFAULT_MTU=1420
 DEFAULT_DNS1="1.1.1.1"
 DEFAULT_DNS2="8.8.8.8"
 
-# Function to detect or select network interface
-select_network_interface() {
-    # Try common interfaces first
-    for iface in eth0 ens3; do
-        if ip link show "$iface" > /dev/null 2>&1; then
-            INTERFACE="$iface"
-            return 0
-        fi
-    done
-
-    # If no common interface is found, list available interfaces
-    echo "No common network interface (eth0 or ens3) found!"
-    echo "Available network interfaces:"
-    ip link show | grep -E '^[0-9]+: ' | awk '{print $2}' | sed 's/://' | while read -r iface; do
-        echo "- $iface"
-    done
-    read -p "Please enter the network interface name: " INTERFACE
-    if ip link show "$INTERFACE" > /dev/null 2>&1; then
-        echo "Selected interface: $INTERFACE"
+# Function to check internet and DNS connectivity
+check_connectivity() {
+    echo "Checking internet and DNS connectivity..."
+    if ping -c 1 8.8.8.8 > /dev/null 2>&1; then
+        echo "Internet connectivity is available."
     else
-        echo "Invalid interface $INTERFACE! Exiting."
+        echo "No internet connectivity! Please check your network connection."
         exit 1
+    fi
+
+    if nslookup github.com > /dev/null 2>&1; then
+        echo "DNS resolution is working."
+    else
+        echo "DNS resolution failed! Setting default DNS servers ($DEFAULT_DNS1, $DEFAULT_DNS2)..."
+        echo "nameserver $DEFAULT_DNS1" > /etc/resolv.conf
+        echo "nameserver $DEFAULT_DNS2" >> /etc/resolv.conf
+        if nslookup github.com > /dev/null 2>&1; then
+            echo "DNS resolution fixed."
+        else
+            echo "Error: Could not resolve host (e.g., github.com). This may be due to ISP restrictions or filtering."
+            echo "Suggestions:"
+            echo "1. Use a VPN to bypass potential ISP filtering."
+            echo "2. Manually add GitHub IP to /etc/hosts (e.g., '185.199.108.133 raw.githubusercontent.com')."
+            echo "3. Contact your ISP or network admin for assistance."
+            exit 1
+        fi
     fi
 }
 
-# Select network interface
-select_network_interface
+# Function to detect the primary network interface
+detect_network_interface() {
+    # Try to detect the primary interface using the default route
+    INTERFACE=$(ip route show default | grep -oP 'dev \K\S+' | head -1)
+    
+    # If no interface is found, try common interfaces
+    if [ -z "$INTERFACE" ]; then
+        for iface in eth0 ens3 enp0s3; do
+            if ip link show "$iface" > /dev/null 2>&1; then
+                INTERFACE="$iface"
+                break
+            fi
+        done
+    fi
+
+    # If still no interface, list all available interfaces and prompt user
+    if [ -z "$INTERFACE" ]; then
+        echo "No default network interface found!"
+        echo "Available network interfaces:"
+        ip link show | grep -E '^[0-9]+: ' | awk '{print $2}' | sed 's/://' | while read -r iface; do
+            echo "- $iface"
+        done
+        read -p "Please enter the network interface name: " INTERFACE
+        if ! ip link show "$INTERFACE" > /dev/null 2>&1; then
+            echo "Invalid interface $INTERFACE! Exiting."
+            exit 1
+        fi
+    fi
+    echo "Selected network interface: $INTERFACE"
+}
+
+# Check connectivity and DNS
+check_connectivity
+
+# Detect network interface
+detect_network_interface
 
 # Backup original sysctl.conf
 SYSCTL_BACKUP="/etc/sysctl.conf.bak"
 if [ ! -f "$SYSCTL_BACKUP" ]; then
-    cp /etc/sysctl.conf "$SYSCTL_BACKUP"
+    cp /etc/sysctl.conf "$SYSCTL_BACKUP" 2>/dev/null || touch "$SYSCTL_BACKUP"
 fi
 
 # Function to install optimizations
@@ -62,9 +100,9 @@ install_optimizations() {
     # Apply TCP and network optimizations
     echo "Applying TCP optimizations for streaming and downloading..."
 
-    # TCP Keepalive for connection stability
-    sysctl -w net.ipv4.tcp_keepalive_time=300
-    sysctl -w net.ipv4.tcp_keepalive_intvl=60
+    # TCP Keepalive for connection stability and lower latency (Heartbeat)
+    sysctl -w net.ipv4.tcp_keepalive_time=120
+    sysctl -w net.ipv4.tcp_keepalive_intvl=30
     sysctl -w net.ipv4.tcp_keepalive_probes=10
 
     # Increase connection limits
@@ -79,14 +117,14 @@ install_optimizations() {
         echo "BBR successfully enabled."
     else
         echo "BBR not supported, attempting to enable BBRv2..."
-        modprobe tcp_bbr
+        modprobe tcp_bbr 2>/dev/null
         sysctl -w net.ipv4.tcp_congestion_control=bbr
     fi
 
     # Additional settings for low latency and streaming
     sysctl -w net.ipv4.tcp_low_latency=1
     sysctl -w net.ipv4.tcp_window_scaling=1
-    sysctl -w net.ipv4.tcp_sack=1
+    sysctl -wmaking -w net.ipv4.tcp_sack=1
     sysctl -w net.ipv4.tcp_no_metrics_save=0
     sysctl -w net.ipv4.tcp_ecn=1
     sysctl -w net.ipv4.tcp_adv_win_scale=1
@@ -108,8 +146,8 @@ install_optimizations() {
     # Save settings to /etc/sysctl.conf
     echo "Saving settings to /etc/sysctl.conf..."
     cat <<EOT > /etc/sysctl.conf
-net.ipv4.tcp_keepalive_time=300
-net.ipv4.tcp_keepalive_intvl=60
+net.ipv4.tcp_keepalive_time=120
+net.ipv4.tcp_keepalive_intvl=30
 net.ipv4.tcp_keepalive_probes=10
 net.core.somaxconn=65535
 net.ipv4.tcp_max_syn_backlog=8192
@@ -145,12 +183,17 @@ EOT
 
     # Disable ufw
     echo "Disabling ufw..."
-    ufw disable
+    ufw disable 2>/dev/null || echo "ufw not installed, skipping."
 
     # Set default DNS
     echo "Setting default DNS servers ($DEFAULT_DNS1, $DEFAULT_DNS2)..."
     echo "nameserver $DEFAULT_DNS1" > /etc/resolv.conf
     echo "nameserver $DEFAULT_DNS2" >> /etc/resolv.conf
+
+    # TCP_NODELAY recommendation
+    echo "Note: For applications using TCP sockets (e.g., rtt), consider enabling TCP_NODELAY to reduce latency."
+    echo "If you have access to the source code, use setsockopt(socket, IPPROTO_TCP, TCP_NODELAY, 1)."
+    echo "Contact your application developer for further guidance."
 
     echo "BBR VIP optimizations installed successfully!"
 }
@@ -176,7 +219,7 @@ uninstall_optimizations() {
 
     # Disable ufw
     echo "Disabling ufw..."
-    ufw disable
+    ufw disable 2>/dev/null || echo "ufw not installed, skipping."
 
     # Reset DNS to system defaults
     echo "Resetting DNS to system defaults..."
@@ -197,32 +240,42 @@ show_status() {
     fi
 
     # Check current MTU
-    CURRENT_MTU=$(ip link show "$INTERFACE" | grep -oP 'mtu \K\d+')
+    CURRENT_MTU=$(ip link show "$INTERFACE" | grep -oP 'mtu \K\d+' || echo "Unknown")
     echo "Current MTU: $CURRENT_MTU"
 
     # Check congestion control
-    CURRENT_BBR=$(sysctl -n net.ipv4.tcp_congestion_control)
+    CURRENT_BBR=$(sysctl -n net.ipv4.tcp_congestion_control || echo "Unknown")
     echo "TCP Congestion Control: $CURRENT_BBR"
+
+    # Check TCP Keepalive settings (Heartbeat)
+    echo "TCP Keepalive settings (Heartbeat):"
+    echo "  Keepalive Time: $(sysctl -n net.ipv4.tcp_keepalive_time) seconds"
+    echo "  Keepalive Interval: $(sysctl -n net.ipv4.tcp_keepalive_intvl) seconds"
+    echo "  Keepalive Probes: $(sysctl -n net.ipv4.tcp_keepalive_probes)"
 
     # Check DNS servers
     echo "Current DNS servers:"
     cat /etc/resolv.conf | grep nameserver || echo "No DNS servers configured."
 
     # Check ufw status
-    if ufw status | grep -q "inactive"; then
+    if command -v ufw >/dev/null && ufw status | grep -q "inactive"; then
         echo "ufw: Disabled"
     else
-        echo "ufw: Enabled"
+        echo "ufw: Enabled or not installed"
     fi
 }
 
 # Function to change MTU
 change_mtu() {
-    echo "Current MTU: $(ip link show "$INTERFACE" | grep -oP 'mtu \K\d+')"
+    echo "Current MTU: $(ip link show "$INTERFACE" | grep -oP 'mtu \K\d+' || echo "Unknown")"
     read -p "Enter new MTU value (between 1280 and 1500, default $DEFAULT_MTU): " CUSTOM_MTU
     if [[ "$CUSTOM_MTU" =~ ^[0-9]+$ && "$CUSTOM_MTU" -ge 1280 && "$CUSTOM_MTU" -le 1500 ]]; then
         ip link set dev "$INTERFACE" mtu $CUSTOM_MTU
-        echo "MTU set to $CUSTOM_MTU."
+        if [ $? -eq 0 ]; then
+            echo "MTU set to $CUSTOM_MTU."
+        else
+            echo "Error setting MTU! Please check the network interface or permissions."
+        fi
     else
         echo "Invalid MTU value! Keeping current MTU."
     fi
