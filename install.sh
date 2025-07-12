@@ -10,6 +10,7 @@ fi
 DEFAULT_MTU=1420
 DEFAULT_DNS1="1.1.1.1" # Cloudflare DNS
 DEFAULT_DNS2="8.8.8.8" # Google DNS
+FALLBACK_DNS="178.22.122.100" # Shecan DNS
 SYSCTL_CUSTOM="/etc/sysctl.d/99-bbr-ultimate.conf"
 
 # Function to check internet and DNS connectivity
@@ -31,13 +32,19 @@ check_connectivity() {
         if nslookup youtube.com > /dev/null 2>&1; then
             echo "DNS resolution fixed."
         else
-            echo "Error: Could not resolve host (e.g., youtube.com). This may be due to ISP restrictions or filtering."
-            echo "Suggestions:"
-            echo "1. Use a VPN to bypass potential ISP filtering."
-            echo "2. Manually add YouTube IP to /etc/hosts (e.g., '142.250.190.14 youtube.com'). Use 'dig youtube.com' to get the latest IP."
-            echo "3. Try alternative DNS like Shecan (178.22.122.100) or Electro (78.157.42.100)."
-            echo "4. Contact your ISP or network admin for assistance."
-            exit 1
+            echo "Trying fallback DNS ($FALLBACK_DNS)..."
+            set_fallback_dns
+            if nslookup youtube.com > /dev/null 2>&1; then
+                echo "DNS resolution fixed with fallback DNS."
+            else
+                echo "Error: Could not resolve host (e.g., youtube.com). This may be due to ISP restrictions or filtering."
+                echo "Suggestions:"
+                echo "1. Use a VPN to bypass potential ISP filtering."
+                echo "2. Manually add YouTube IP to /etc/hosts (e.g., '142.250.190.14 youtube.com'). Use 'dig youtube.com' to get the latest IP."
+                echo "3. Try alternative DNS like Electro (78.157.42.100)."
+                echo "4. Contact your ISP or network admin for assistance."
+                exit 1
+            fi
         fi
     fi
 }
@@ -51,13 +58,31 @@ set_dns() {
         echo "System uses systemd-resolved. Updating DNS via resolved.conf..."
         echo "[Resolve]" > /etc/systemd/resolved.conf
         echo "DNS=$DEFAULT_DNS1 $DEFAULT_DNS2" >> /etc/systemd/resolved.conf
-        echo "FallbackDNS=1.1.1.1 8.8.8.8" >> /etc/systemd/resolved.conf
+        echo "FallbackDNS=$FALLBACK_DNS" >> /etc/systemd/resolved.conf
         systemctl restart systemd-resolved
         ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
     else
         echo "Setting DNS directly in /etc/resolv.conf..."
         echo "nameserver $DEFAULT_DNS1" > /etc/resolv.conf
         echo "nameserver $DEFAULT_DNS2" >> /etc/resolv.conf
+    fi
+}
+
+# Function to set fallback DNS
+set_fallback_dns() {
+    echo "Backing up current DNS settings..."
+    cp /etc/resolv.conf /etc/resolv.conf.bak 2>/dev/null || echo "No existing /etc/resolv.conf to backup."
+
+    if systemctl is-active systemd-resolved >/dev/null 2>&1; then
+        echo "System uses systemd-resolved. Updating DNS via resolved.conf..."
+        echo "[Resolve]" > /etc/systemd/resolved.conf
+        echo "DNS=$FALLBACK_DNS" >> /etc/systemd/resolved.conf
+        echo "FallbackDNS=1.1.1.1 8.8.8.8" >> /etc/systemd/resolved.conf
+        systemctl restart systemd-resolved
+        ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+    else
+        echo "Setting fallback DNS in /etc/resolv.conf..."
+        echo "nameserver $FALLBACK_DNS" > /etc/resolv.conf
     fi
 }
 
@@ -126,10 +151,10 @@ install_optimizations() {
 net.ipv4.tcp_keepalive_time=120
 net.ipv4.tcp_keepalive_intvl=30
 net.ipv4.tcp_keepalive_probes=8
-net.core.somaxconn=32768
-net.ipv4.tcp_max_syn_backlog=8192
-net.core.netdev_max_backlog=5000
-net.ipv4.tcp_max_tw_buckets=65536
+net.core.somaxconn=16384
+net.ipv4.tcp_max_syn_backlog=4096
+net.core.netdev_max_backlog=3000
+net.ipv4.tcp_max_tw_buckets=32768
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 net.ipv4.tcp_low_latency=1
@@ -140,10 +165,10 @@ net.ipv4.tcp_ecn=0
 net.ipv4.tcp_mtu_probing=1
 net.ipv4.tcp_base_mss=1024
 net.ipv4.tcp_fastopen=3
-net.ipv4.tcp_rmem=4096 87380 6291456
-net.ipv4.tcp_wmem=4096 16384 6291456
-net.core.rmem_max=8388608
-net.core.wmem_max=8388608
+net.ipv4.tcp_rmem=4096 65536 4194304
+net.ipv4.tcp_wmem=4096 16384 4194304
+net.core.rmem_max=6291456
+net.core.wmem_max=6291456
 EOT
 
     # Load BBR module
@@ -170,13 +195,6 @@ EOT
         echo "BBR or BBRv2 successfully enabled."
     fi
 
-    # Set CPU and IO priority for ReverseTlsTunnel service
-    echo "Setting CPU and IO priority for ReverseTlsTunnel service..."
-    systemctl set-property rtt.service CPUSchedulingPolicy=rr IOSchedulingPriority=1 2>/dev/null
-    if [ $? -ne 0 ]; then
-        echo "Note: Could not set priority for rtt service. Please check if the rtt service exists."
-    fi
-
     # Disable ufw
     echo "Disabling ufw..."
     ufw disable 2>/dev/null || echo "ufw not installed, skipping."
@@ -185,7 +203,7 @@ EOT
     set_dns
 
     # TCP_NODELAY recommendation
-    echo "Note: For TCP-based services (e.g., rtt), enable TCP_NODELAY to reduce latency."
+    echo "Note: For TCP-based services, enable TCP_NODELAY to reduce latency."
     echo "If you have access to the source code, use setsockopt(socket, IPPROTO_TCP, TCP_NODELAY, 1)."
     echo "Contact your application developer for guidance."
 
@@ -228,13 +246,6 @@ uninstall_optimizations() {
         echo "Error resetting MTU! Please check the network interface."
     fi
 
-    # Reset CPU and IO priority for rtt service
-    echo "Resetting CPU and IO priority for ReverseTlsTunnel service..."
-    systemctl reset-property rtt.service CPUSchedulingPolicy IOSchedulingPriority 2>/dev/null
-    if [ $? -ne 0 ]; then
-        echo "Note: Could not reset priority for rtt service. Please check if the rtt service exists."
-    fi
-
     # Disable ufw
     echo "Disabling ufw..."
     ufw disable 2>/dev/null || echo "ufw not installed, skipping."
@@ -264,13 +275,6 @@ uninstall_optimizations() {
 show_status() {
     echo "Checking system status..."
 
-    # Check rtt service status
-    if systemctl is-active rtt.service >/dev/null 2>&1; then
-        echo "ReverseTlsTunnel (rtt) service: Active"
-    else
-        echo "ReverseTlsTunnel (rtt) service: Inactive or not found"
-    fi
-
     # Check current MTU
     CURRENT_MTU=$(ip link show "$INTERFACE" | grep -oP 'mtu \K\d+' || echo "Unknown")
     echo "Current MTU: $CURRENT_MTU"
@@ -295,89 +299,13 @@ show_status() {
     else
         echo "ufw: Enabled or not installed"
     fi
-}
 
-# Function to change MTU
-change_mtu() {
-    echo "Current MTU: $(ip link show "$INTERFACE" | grep -oP 'mtu \K\d+' || echo "Unknown")"
-    read -p "Enter new MTU value (between 1280 and 1500, default $DEFAULT_MTU): " CUSTOM_MTU
-    if [[ "$CUSTOM_MTU" =~ ^[0-9]+$ && "$CUSTOM_MTU" -ge 1280 && "$CUSTOM_MTU" -le 1500 ]]; then
-        ip link set dev "$INTERFACE" mtu $CUSTOM_MTU
-        if [ $? -eq 0 ]; then
-            echo "MTU set to $CUSTOM_MTU."
-        else
-            echo "Error setting MTU! Please check the network interface or permissions."
-        fi
-    else
-        echo "Invalid MTU value! Keeping current MTU."
-    fi
-}
+    # Check system resources
+    echo "Checking system resources..."
+    echo "CPU Usage: $(top -bn1 | head -n 3 | grep "Cpu(s)" | awk '{print $2 + $4 "%"}')"
+    echo "Memory Usage: $(free -h | grep Mem | awk '{print $3 "/" $2}')"
+    echo "Disk I/O: $(iostat -x 1 2 | grep -E '^(sda|nvme0n1)' | tail -n 1 | awk '{print $14 "%"}' || echo "Unable to check disk I/O")"
 
-# Function to change DNS
-change_dns() {
-    echo "Current DNS servers:"
-    cat /etc/resolv.conf | grep nameserver || echo "No DNS servers configured."
-    echo "Default DNS servers: $DEFAULT_DNS1, $DEFAULT_DNS2"
-    read -p "Do you want to change DNS servers? (y/n): " dns_choice
-    if [[ "$dns_choice" == "y" || "$dns_choice" == "Y" ]]; then
-        echo "Backing up current DNS settings..."
-        cp /etc/resolv.conf /etc/resolv.conf.bak 2>/dev/null || echo "No existing /etc/resolv.conf to backup."
-        read -p "Enter first DNS server: " DNS1
-        read -p "Enter second DNS server (optional): " DNS2
-        if [[ -n "$DNS1" ]]; then
-            if systemctl is-active systemd-resolved >/dev/null 2>&1; then
-                echo "System uses systemd-resolved. Updating DNS via resolved.conf..."
-                echo "[Resolve]" > /etc/systemd/resolved.conf
-                echo "DNS=$DNS1${DNS2:+ $DNS2}" >> /etc/systemd/resolved.conf
-                echo "FallbackDNS=1.1.1.1 8.8.8.8" >> /etc/systemd/resolved.conf
-                systemctl restart systemd-resolved
-                ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
-            else
-                echo "nameserver $DNS1" > /etc/resolv.conf
-                if [[ -n "$DNS2" ]]; then
-                    echo "nameserver $DNS2" >> /etc/resolv.conf
-                fi
-            fi
-            echo "DNS servers updated successfully."
-        else
-            echo "No valid DNS server provided! Keeping current configuration."
-        fi
-    else
-        set_dns
-    fi
-}
-
-# Function to reboot server
-reboot_server() {
-    read -p "Are you sure you want to reboot the server? (y/n): " reboot_choice
-    if [[ "$reboot_choice" == "y" || "$reboot_choice" == "Y" ]]; then
-        echo "Syncing data and rebooting server..."
-        sync && reboot
-    else
-        echo "Reboot canceled."
-    fi
-}
-
-# Menu
-while true; do
-    echo -e "\n=== Ultimate BBRv2 By Parham Pahlevan ==="
-    echo "1. Install Ultimate BBRv2 By Parham Pahlevan"
-    echo "2. Uninstall all optimizations"
-    echo "3. Show status"
-    echo "4. Change MTU"
-    echo "5. Change DNS"
-    echo "6. Reboot"
-    echo "7. Exit"
-    read -p "Select an option [1-7]: " option
-
-    case $option in
-        1) install_optimizations ;;
-        2) uninstall_optimizations ;;
-        3) show_status ;;
-        4) change_mtu ;;
-        5) change_dns ;;
-        6) reboot_server ;;
-        7) echo "Exiting..."; exit 0 ;;
-        *) echo "Invalid option! Please select a number between 1 and 7." ;;
-    esac
-done
+    # Network diagnostics suggestions
+    echo "Network diagnostics suggestions:"
+    echo "1. Run 'iperf3 -c iperf.he.net' to test
