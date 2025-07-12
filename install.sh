@@ -10,6 +10,7 @@ fi
 DEFAULT_MTU=1420
 DEFAULT_DNS1="1.1.1.1"
 DEFAULT_DNS2="8.8.8.8"
+ALT_DNS="178.22.122.100" # Shecan DNS as alternative
 
 # Function to check internet and DNS connectivity
 check_connectivity() {
@@ -30,13 +31,19 @@ check_connectivity() {
         if nslookup youtube.com > /dev/null 2>&1; then
             echo "DNS resolution fixed."
         else
-            echo "Error: Could not resolve host (e.g., youtube.com). This may be due to ISP restrictions or filtering."
-            echo "Suggestions:"
-            echo "1. Use a VPN to bypass potential ISP filtering."
-            echo "2. Try alternative DNS servers like Shecan (178.22.122.100) or Electro (10.10.34.34)."
-            echo "3. Manually add YouTube IP to /etc/hosts (e.g., '142.250.190.14 youtube.com')."
-            echo "4. Contact your ISP or network admin for assistance."
-            exit 1
+            echo "Trying alternative DNS server ($ALT_DNS)..."
+            echo "nameserver $ALT_DNS" > /etc/resolv.conf
+            if nslookup youtube.com > /dev/null 2>&1; then
+                echo "DNS resolution fixed with alternative DNS."
+            else
+                echo "Error: Could not resolve host (e.g., youtube.com). This may be due to ISP restrictions or filtering."
+                echo "Suggestions:"
+                echo "1. Use a VPN to bypass potential ISP filtering."
+                echo "2. Manually add YouTube IP to /etc/hosts (e.g., '142.250.190.14 youtube.com')."
+                echo "3. Try another DNS like Electro (10.10.34.34)."
+                echo "4. Contact your ISP or network admin for assistance."
+                exit 1
+            fi
         fi
     fi
 }
@@ -72,6 +79,21 @@ detect_network_interface() {
     echo "Selected network interface: $INTERFACE"
 }
 
+# Function to test and set optimal MTU
+test_mtu() {
+    echo "Testing optimal MTU for interface $INTERFACE..."
+    current_mtu=$(ip link show "$INTERFACE" | grep -oP 'mtu \K\d+' || echo "1500")
+    for mtu in 1500 1452 1420; do
+        ip link set dev "$INTERFACE" mtu $mtu
+        if ping -s $((mtu - 28)) -M do -c 1 8.8.8.8 > /dev/null 2>&1; then
+            echo "MTU $mtu is working."
+            return 0
+        fi
+    done
+    echo "No optimal MTU found, reverting to default ($DEFAULT_MTU)..."
+    ip link set dev "$INTERFACE" mtu $DEFAULT_MTU
+}
+
 # Check connectivity and DNS
 check_connectivity
 
@@ -88,28 +110,21 @@ fi
 install_optimizations() {
     echo "Installing BBR VIP optimizations by Parham Pahlevan for minimal ping and maximum speed..."
 
-    # Set default MTU
-    echo "Setting MTU to $DEFAULT_MTU for interface $INTERFACE..."
-    ip link set dev "$INTERFACE" mtu $DEFAULT_MTU
-    if [ $? -eq 0 ]; then
-        echo "MTU successfully set to $DEFAULT_MTU."
-    else
-        echo "Error setting MTU! Please check the network interface or permissions."
-        exit 1
-    fi
+    # Test and set optimal MTU
+    test_mtu
 
     # Apply TCP and network optimizations
-    echo "Applying TCP optimizations for streaming 4K and low-latency connections..."
+    echo "Applying TCP optimizations for low ping and high-speed 4K streaming..."
 
     # TCP Keepalive for connection stability and lower latency (Heartbeat)
-    sysctl -w net.ipv4.tcp_keepalive_time=60
-    sysctl -w net.ipv4.tcp_keepalive_intvl=15
-    sysctl -w net.ipv4.tcp_keepalive_probes=8
+    sysctl -w net.ipv4.tcp_keepalive_time=120
+    sysctl -w net.ipv4.tcp_keepalive_intvl=30
+    sysctl -w net.ipv4.tcp_keepalive_probes=10
 
     # Increase connection limits for high throughput
     sysctl -w net.core.somaxconn=65535
     sysctl -w net.ipv4.tcp_max_syn_backlog=8192
-    sysctl -w net.core.netdev_max_backlog=10000
+    sysctl -w net.core.netdev_max_backlog=5000
     sysctl -w net.ipv4.tcp_max_tw_buckets=200000
 
     # Enhance BBR for streaming and downloading
@@ -132,7 +147,7 @@ install_optimizations() {
     sysctl -w net.ipv4.tcp_window_scaling=1
     sysctl -w net.ipv4.tcp_sack=1
     sysctl -w net.ipv4.tcp_no_metrics_save=0
-    sysctl -w net.ipv4.tcp_ecn=2  # Enable ECN aggressively for better congestion handling
+    sysctl -w net.ipv4.tcp_ecn=1  # Standard ECN for compatibility
     sysctl -w net.ipv4.tcp_adv_win_scale=1
     sysctl -w net.ipv4.tcp_moderate_rcvbuf=1
 
@@ -143,21 +158,21 @@ install_optimizations() {
     sysctl -w net.ipv4.tcp_mtu_probing=1
     sysctl -w net.ipv4.tcp_base_mss=1024
 
-    # Optimize TCP buffers for 4K streaming
-    sysctl -w net.ipv4.tcp_rmem='8192 131072 16777216'
-    sysctl -w net.ipv4.tcp_wmem='8192 65536 16777216'
-    sysctl -w net.core.rmem_max=33554432
-    sysctl -w net.core.wmem_max=33554432
+    # Optimize TCP buffers for balanced performance
+    sysctl -w net.ipv4.tcp_rmem='4096 87380 8388608'
+    sysctl -w net.ipv4.tcp_wmem='4096 16384 8388608'
+    sysctl -w net.core.rmem_max=16777216
+    sysctl -w net.core.wmem_max=16777216
 
     # Save settings to /etc/sysctl.conf
     echo "Saving settings to /etc/sysctl.conf..."
     cat <<EOT > /etc/sysctl.conf
-net.ipv4.tcp_keepalive_time=60
-net.ipv4.tcp_keepalive_intvl=15
-net.ipv4.tcp_keepalive_probes=8
+net.ipv4.tcp_keepalive_time=120
+net.ipv4.tcp_keepalive_intvl=30
+net.ipv4.tcp_keepalive_probes=10
 net.core.somaxconn=65535
 net.ipv4.tcp_max_syn_backlog=8192
-net.core.netdev_max_backlog=10000
+net.core.netdev_max_backlog=5000
 net.ipv4.tcp_max_tw_buckets=200000
 net.core.default_qdisc=fq_codel
 net.ipv4.tcp_congestion_control=bbr
@@ -165,16 +180,16 @@ net.ipv4.tcp_low_latency=1
 net.ipv4.tcp_window_scaling=1
 net.ipv4.tcp_sack=1
 net.ipv4.tcp_no_metrics_save=0
-net.ipv4.tcp_ecn=2
+net.ipv4.tcp_ecn=1
 net.ipv4.tcp_adv_win_scale=1
 net.ipv4.tcp_moderate_rcvbuf=1
 net.ipv4.tcp_fastopen=3
 net.ipv4.tcp_mtu_probing=1
 net.ipv4.tcp_base_mss=1024
-net.ipv4.tcp_rmem=8192 131072 16777216
-net.ipv4.tcp_wmem=8192 65536 16777216
-net.core.rmem_max=33554432
-net.core.wmem_max=33554432
+net.ipv4.tcp_rmem=4096 87380 8388608
+net.ipv4.tcp_wmem=4096 16384 8388608
+net.core.rmem_max=16777216
+net.core.wmem_max=16777216
 EOT
 
     # Apply sysctl settings
@@ -292,6 +307,7 @@ change_dns() {
     echo "Current DNS servers:"
     cat /etc/resolv.conf | grep nameserver || echo "No DNS servers configured."
     echo "Default DNS servers: $DEFAULT_DNS1, $DEFAULT_DNS2"
+    echo "Alternative DNS: $ALT_DNS (Shecan)"
     read -p "Do you want to change DNS servers? (y/n): " dns_choice
     if [[ "$dns_choice" == "y" || "$dns_choice" == "Y" ]]; then
         read -p "Enter first DNS server: " DNS1
