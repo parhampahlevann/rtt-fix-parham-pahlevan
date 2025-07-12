@@ -8,9 +8,8 @@ fi
 
 # Default variables
 DEFAULT_MTU=1420
-DEFAULT_DNS1="1.1.1.1"
-DEFAULT_DNS2="8.8.8.8"
-ALT_DNS="178.22.122.100" # Shecan DNS as alternative
+DEFAULT_DNS1="178.22.122.100" # Shecan DNS
+DEFAULT_DNS2="78.157.42.100"  # Electro DNS
 
 # Function to check internet and DNS connectivity
 check_connectivity() {
@@ -31,19 +30,13 @@ check_connectivity() {
         if nslookup youtube.com > /dev/null 2>&1; then
             echo "DNS resolution fixed."
         else
-            echo "Trying alternative DNS server ($ALT_DNS)..."
-            echo "nameserver $ALT_DNS" > /etc/resolv.conf
-            if nslookup youtube.com > /dev/null 2>&1; then
-                echo "DNS resolution fixed with alternative DNS."
-            else
-                echo "Error: Could not resolve host (e.g., youtube.com). This may be due to ISP restrictions or filtering."
-                echo "Suggestions:"
-                echo "1. Use a VPN to bypass potential ISP filtering."
-                echo "2. Manually add YouTube IP to /etc/hosts (e.g., '142.250.190.14 youtube.com')."
-                echo "3. Try another DNS like Electro (10.10.34.34)."
-                echo "4. Contact your ISP or network admin for assistance."
-                exit 1
-            fi
+            echo "Error: Could not resolve host (e.g., youtube.com). This may be due to ISP restrictions or filtering."
+            echo "Suggestions:"
+            echo "1. Use a VPN to bypass potential ISP filtering."
+            echo "2. Manually add YouTube IP to /etc/hosts (e.g., '142.250.190.14 youtube.com')."
+            echo "3. Try alternative DNS like Cloudflare (1.1.1.1) or Google (8.8.8.8)."
+            echo "4. Contact your ISP or network admin for assistance."
+            exit 1
         fi
     fi
 }
@@ -55,7 +48,7 @@ detect_network_interface() {
     
     # If no interface is found, try common interfaces
     if [ -z "$INTERFACE" ]; then
-        for iface in eth0 ens3 enp0s3; do
+        for iface in eth0 ens3 enp0s3 enp0s8; do
             if ip link show "$iface" > /dev/null 2>&1; then
                 INTERFACE="$iface"
                 break
@@ -83,10 +76,10 @@ detect_network_interface() {
 test_mtu() {
     echo "Testing optimal MTU for interface $INTERFACE..."
     current_mtu=$(ip link show "$INTERFACE" | grep -oP 'mtu \K\d+' || echo "1500")
-    for mtu in 1500 1452 1420; do
+    for mtu in 1500 1452 1420 1400; do
         ip link set dev "$INTERFACE" mtu $mtu
         if ping -s $((mtu - 28)) -M do -c 1 8.8.8.8 > /dev/null 2>&1; then
-            echo "MTU $mtu is working."
+            echo "MTU $mtu is optimal."
             return 0
         fi
     done
@@ -108,7 +101,7 @@ fi
 
 # Function to install optimizations
 install_optimizations() {
-    echo "Installing BBR VIP optimizations by Parham Pahlevan for minimal ping and maximum speed..."
+    echo "Installing Ultimate BBRv2 optimizations by Parham Pahlevan for minimal ping and maximum speed..."
 
     # Test and set optimal MTU
     test_mtu
@@ -127,19 +120,18 @@ install_optimizations() {
     sysctl -w net.core.netdev_max_backlog=5000
     sysctl -w net.ipv4.tcp_max_tw_buckets=200000
 
-    # Enhance BBR for streaming and downloading
-    sysctl -w net.core.default_qdisc=fq_codel
-    if sysctl -w net.ipv4.tcp_congestion_control=bbr 2>/dev/null; then
-        echo "BBR successfully enabled."
-    else
-        echo "BBR not supported, attempting to enable BBRv2..."
-        modprobe tcp_bbr 2>/dev/null
+    # Enhance BBRv2 or BBR for streaming and downloading
+    sysctl -w net.core.default_qdisc=fq
+    if modprobe tcp_bbr 2>/dev/null; then
         if sysctl -w net.ipv4.tcp_congestion_control=bbr 2>/dev/null; then
-            echo "BBRv2 successfully enabled."
+            echo "BBR or BBRv2 successfully enabled."
         else
             echo "BBR not supported. Falling back to cubic."
             sysctl -w net.ipv4.tcp_congestion_control=cubic
         fi
+    else
+        echo "BBR module not available. Falling back to cubic."
+        sysctl -w net.ipv4.tcp_congestion_control=cubic
     fi
 
     # Additional settings for low latency and high-speed streaming
@@ -147,7 +139,7 @@ install_optimizations() {
     sysctl -w net.ipv4.tcp_window_scaling=1
     sysctl -w net.ipv4.tcp_sack=1
     sysctl -w net.ipv4.tcp_no_metrics_save=0
-    sysctl -w net.ipv4.tcp_ecn=1  # Standard ECN for compatibility
+    sysctl -w net.ipv4.tcp_ecn=0  # Disable ECN for compatibility
     sysctl -w net.ipv4.tcp_adv_win_scale=1
     sysctl -w net.ipv4.tcp_moderate_rcvbuf=1
 
@@ -174,13 +166,13 @@ net.core.somaxconn=65535
 net.ipv4.tcp_max_syn_backlog=8192
 net.core.netdev_max_backlog=5000
 net.ipv4.tcp_max_tw_buckets=200000
-net.core.default_qdisc=fq_codel
+net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 net.ipv4.tcp_low_latency=1
 net.ipv4.tcp_window_scaling=1
 net.ipv4.tcp_sack=1
 net.ipv4.tcp_no_metrics_save=0
-net.ipv4.tcp_ecn=1
+net.ipv4.tcp_ecn=0
 net.ipv4.tcp_adv_win_scale=1
 net.ipv4.tcp_moderate_rcvbuf=1
 net.ipv4.tcp_fastopen=3
@@ -216,7 +208,7 @@ EOT
     echo "If you have access to the source code, use setsockopt(socket, IPPROTO_TCP, TCP_NODELAY, 1)."
     echo "Contact your application developer for further guidance."
 
-    echo "BBR VIP optimizations installed successfully for low ping and high-speed 4K streaming!"
+    echo "Ultimate BBRv2 optimizations installed successfully for low ping and high-speed 4K streaming!"
 }
 
 # Function to uninstall optimizations
@@ -307,7 +299,6 @@ change_dns() {
     echo "Current DNS servers:"
     cat /etc/resolv.conf | grep nameserver || echo "No DNS servers configured."
     echo "Default DNS servers: $DEFAULT_DNS1, $DEFAULT_DNS2"
-    echo "Alternative DNS: $ALT_DNS (Shecan)"
     read -p "Do you want to change DNS servers? (y/n): " dns_choice
     if [[ "$dns_choice" == "y" || "$dns_choice" == "Y" ]]; then
         read -p "Enter first DNS server: " DNS1
@@ -341,8 +332,8 @@ reboot_server() {
 
 # Menu
 while true; do
-    echo -e "\n=== BBR VIP By Parham Pahlevan ==="
-    echo "1. Install BBR VIP By Parham Pahlevan"
+    echo -e "\n=== Ultimate BBRv2 By Parham Pahlevan ==="
+    echo "1. Install Ultimate BBRv2 By Parham Pahlevan"
     echo "2. Uninstall optimizations"
     echo "3. Show status"
     echo "4. Change MTU"
