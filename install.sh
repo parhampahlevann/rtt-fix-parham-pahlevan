@@ -2,7 +2,7 @@
 
 # Global Configuration
 SCRIPT_NAME="BBR VIP Optimizer"
-SCRIPT_VERSION="2.4"
+SCRIPT_VERSION="2.5"
 AUTHOR="Parham Pahlevan"
 CONFIG_FILE="/etc/bbr_vip.conf"
 LOG_FILE="/var/log/bbr_vip.log"
@@ -12,7 +12,7 @@ CRON_JOB_FILE="/etc/cron.d/bbr_vip_autoreset"
 # Initialize logging
 exec > >(tee -a "$LOG_FILE") 2>&1
 
-# Color and Formatting
+# Color Codes
 RED='\033[0;31m'
 BOLD_RED='\033[1;31m'
 GREEN='\033[0;32m'
@@ -27,7 +27,6 @@ show_header() {
     echo -e "${BLUE}${BOLD}╔════════════════════════════════════════════════╗"
     echo -e "║   ${SCRIPT_NAME} ${SCRIPT_VERSION} - ${AUTHOR}   ║"
     echo -e "╚════════════════════════════════════════════════╝${NC}"
-    echo ""
 }
 
 # Check Root
@@ -38,28 +37,16 @@ check_root() {
     fi
 }
 
-# Install Dependencies
-install_deps() {
-    local packages=("bc" "jq" "net-tools")
-    local to_install=()
-    
-    for pkg in "${packages[@]}"; do
-        if ! dpkg -l | grep -q "^ii  $pkg "; then
-            to_install+=("$pkg")
-        fi
-    done
-    
-    if [[ ${#to_install[@]} -gt 0 ]]; then
-        echo -e "${YELLOW}Installing dependencies: ${to_install[*]}${NC}"
-        apt-get update && apt-get install -y "${to_install[@]}"
-    fi
+# Clean line endings (for Windows compatibility)
+clean_script() {
+    sed -i 's/\r$//' "$0" 2>/dev/null
 }
 
 # Network Interface Selection
 select_interface() {
     interfaces=($(ip -o link show | awk -F': ' '{print $2}' | grep -v lo))
     
-    if [[ ${#interfaces[@]} -eq 1 ]]; then
+    if [ ${#interfaces[@]} -eq 1 ]; then
         INTERFACE=${interfaces[0]}
         echo -e "${GREEN}Auto-selected interface: $INTERFACE${NC}"
         return
@@ -68,7 +55,7 @@ select_interface() {
     echo -e "${YELLOW}Available network interfaces:${NC}"
     PS3="Please select interface (1-${#interfaces[@]}): "
     select INTERFACE in "${interfaces[@]}"; do
-        if [[ -n "$INTERFACE" ]]; then
+        if [ -n "$INTERFACE" ]; then
             break
         else
             echo -e "${RED}Invalid selection!${NC}"
@@ -80,19 +67,25 @@ select_interface() {
 configure_bbr() {
     echo -e "\n${YELLOW}Configuring TCP congestion control...${NC}"
     
-    # Load required modules
-    modprobe tcp_bbr 2>/dev/null || echo -e "${RED}Failed to load tcp_bbr module${NC}"
-    modprobe sch_fq 2>/dev/null || echo -e "${RED}Failed to load sch_fq module${NC}"
+    # Try BBRv2 first
+    if modprobe tcp_bbr2 2>/dev/null; then
+        sysctl -w net.ipv4.tcp_congestion_control=bbr2
+        echo -e "${GREEN}BBRv2 enabled successfully!${NC}"
+    elif modprobe tcp_bbr; then
+        sysctl -w net.ipv4.tcp_congestion_control=bbr
+        echo -e "${GREEN}BBRv1 enabled successfully!${NC}"
+    else
+        sysctl -w net.ipv4.tcp_congestion_control=cubic
+        echo -e "${RED}BBR not available. Falling back to Cubic.${NC}"
+        return 1
+    fi
 
-    # Apply BBR settings
-    {
-        echo "net.core.default_qdisc=fq"
-        echo "net.ipv4.tcp_congestion_control=bbr"
-    } >> /etc/sysctl.conf
-    
-    sysctl -p
-    
-    echo -e "${GREEN}BBR configured successfully!${NC}"
+    # Configure qdisc
+    if modprobe sch_cake 2>/dev/null; then
+        sysctl -w net.core.default_qdisc=cake
+    else
+        sysctl -w net.core.default_qdisc=fq_codel
+    fi
 }
 
 # TCP Optimization
@@ -107,8 +100,16 @@ net.ipv4.tcp_keepalive_probes = 10
 net.core.somaxconn = 65535
 net.ipv4.tcp_max_syn_backlog = 8192
 net.core.netdev_max_backlog = 5000
+net.ipv4.tcp_max_tw_buckets = 200000
 
 # Performance tuning
+net.ipv4.tcp_low_latency = 1
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_no_metrics_save = 0
+net.ipv4.tcp_ecn = 1
+net.ipv4.tcp_adv_win_scale = 1
+net.ipv4.tcp_moderate_rcvbuf = 1
 net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_mtu_probing = 1
 net.ipv4.tcp_base_mss = 1024
@@ -123,6 +124,31 @@ EOF
     sysctl --system
 }
 
+# DNS Configuration
+configure_dns() {
+    local dns1=${1:-"1.1.1.1"}
+    local dns2=${2:-"8.8.8.8"}
+    
+    echo -e "\n${YELLOW}Configuring DNS servers...${NC}"
+    
+    # Systemd-resolved
+    if systemctl is-active systemd-resolved &>/dev/null; then
+        mkdir -p /etc/systemd/resolved.conf.d/
+        cat << EOF > /etc/systemd/resolved.conf.d/bbr.conf
+[Resolve]
+DNS=$dns1 $dns2
+DNSOverTLS=opportunistic
+EOF
+        systemctl restart systemd-resolved
+    else
+        # Traditional resolv.conf
+        cat << EOF > /etc/resolv.conf
+nameserver $dns1
+nameserver $dns2
+EOF
+    fi
+}
+
 # Firewall Configuration
 configure_firewall() {
     echo -e "\n${YELLOW}Configuring firewall...${NC}"
@@ -133,32 +159,47 @@ configure_firewall() {
     fi
 }
 
-# X-UI Detection
-detect_xui() {
-    if systemctl is-active x-ui &>/dev/null; then
-        echo "x-ui"
-    fi
-}
-
-# Cron Job Management
-add_cron_job() {
-    local service_name="$1"
-    local interval="${2:-15}"
+# Service Auto-Reset
+configure_auto_reset() {
+    local service_name=""
+    local interval=15
     
-    echo -e "\n${YELLOW}Adding cron job for $service_name...${NC}"
+    echo -e "\n${YELLOW}=== Service Auto-Reset Configuration ===${NC}"
+    
+    read -p "Enter service name to auto-restart (e.g., x-ui, nginx): " service_name
+    read -p "Enter restart interval in minutes (default 15): " interval
+    
+    if ! systemctl is-active "$service_name" &>/dev/null; then
+        echo -e "${RED}Error: Service $service_name is not active!${NC}"
+        return 1
+    fi
     
     echo "*/$interval * * * * root systemctl restart $service_name >/dev/null 2>&1" > "$CRON_JOB_FILE"
     chmod 644 "$CRON_JOB_FILE"
     systemctl restart cron
     
-    echo -e "${GREEN}Cron job added successfully!${NC}"
+    echo -e "${GREEN}Auto-restart configured for $service_name every $interval minutes!${NC}"
+}
+
+# MTU Configuration
+configure_mtu() {
+    local current_mtu=$(ip link show $INTERFACE | grep -oP 'mtu \K\d+')
+    
+    echo -e "\n${YELLOW}Current MTU: $current_mtu${NC}"
+    read -p "Enter new MTU (68-9000): " new_mtu
+    
+    if [[ $new_mtu =~ ^[0-9]+$ && $new_mtu -ge 68 && $new_mtu -le 9000 ]]; then
+        ip link set dev $INTERFACE mtu $new_mtu
+        echo -e "${GREEN}MTU set to $new_mtu successfully!${NC}"
+    else
+        echo -e "${RED}Invalid MTU value!${NC}"
+    fi
 }
 
 # Main Installation
 install_optimizations() {
     show_header
     check_root
-    install_deps
     select_interface
     
     # Backup original settings
@@ -166,18 +207,10 @@ install_optimizations() {
     
     configure_bbr
     optimize_tcp
+    configure_dns
     configure_firewall
     
-    # Check for X-UI
-    if xui_service=$(detect_xui); then
-        read -p "Detected X-UI service. Configure auto-restart? (y/n): " choice
-        if [[ "$choice" =~ [yY] ]]; then
-            add_cron_job "$xui_service"
-        fi
-    fi
-    
-    echo -e "\n${GREEN}Optimization completed successfully!${NC}"
-    echo -e "Log file: ${BLUE}$LOG_FILE${NC}"
+    echo -e "\n${GREEN}Optimizations completed successfully!${NC}"
 }
 
 # Uninstallation
@@ -187,14 +220,14 @@ uninstall_optimizations() {
     
     echo -e "\n${YELLOW}=== Reverting optimizations ===${NC}"
     
-    if [[ -f "$SYSCTL_BACKUP" ]]; then
+    if [ -f "$SYSCTL_BACKUP" ]; then
         cp "$SYSCTL_BACKUP" /etc/sysctl.conf
         rm -f /etc/sysctl.d/60-bbr-optimizations.conf
         sysctl -p
         echo -e "${GREEN}System settings restored.${NC}"
     fi
     
-    if [[ -f "$CRON_JOB_FILE" ]]; then
+    if [ -f "$CRON_JOB_FILE" ]; then
         rm -f "$CRON_JOB_FILE"
         systemctl restart cron
         echo -e "${GREEN}Cron job removed.${NC}"
@@ -211,8 +244,9 @@ check_status() {
     echo -e "\n${BOLD}Kernel:${NC} $(uname -r)"
     echo -e "${BOLD}BBR Status:${NC} $(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')"
     echo -e "${BOLD}Queue Discipline:${NC} $(sysctl net.core.default_qdisc | awk '{print $3}')"
+    echo -e "${BOLD}Interface MTU:${NC} $(ip link show $INTERFACE | grep -oP 'mtu \K\d+')"
     
-    if [[ -f "$CRON_JOB_FILE" ]]; then
+    if [ -f "$CRON_JOB_FILE" ]; then
         echo -e "\n${BOLD}Auto-Restart Service:${NC}"
         echo "Service: $(awk '{print $6}' $CRON_JOB_FILE)"
         echo "Interval: $(awk '{print $1}' $CRON_JOB_FILE | cut -d'/' -f2) minutes"
@@ -224,18 +258,33 @@ show_menu() {
     while true; do
         show_header
         echo -e "${BOLD}Main Menu:${NC}"
-        echo -e "1. ${GREEN}Install Optimizations${NC}"
-        echo -e "2. ${RED}Uninstall Optimizations${NC}"
-        echo -e "3. ${BLUE}Check Status${NC}"
-        echo -e "4. ${BOLD_RED}Exit${NC}"
+        echo "1. Install Optimizations"
+        echo "2. Uninstall Optimizations"
+        echo "3. Check System Status"
+        echo "4. Configure MTU"
+        echo "5. Configure DNS"
+        echo "6. Configure Service Auto-Restart"
+        echo "7. Reboot System"
+        echo -e "8. ${BOLD_RED}Exit${NC}"
         
-        read -p "Select an option [1-4]: " choice
+        read -p "Select an option [1-8]: " choice
         
         case $choice in
             1) install_optimizations ;;
             2) uninstall_optimizations ;;
             3) check_status ;;
-            4) 
+            4) configure_mtu ;;
+            5) 
+                read -p "Enter primary DNS: " dns1
+                read -p "Enter secondary DNS: " dns2
+                configure_dns "$dns1" "$dns2"
+                ;;
+            6) configure_auto_reset ;;
+            7) 
+                read -p "Are you sure you want to reboot? (y/n): " confirm
+                [[ "$confirm" =~ [yY] ]] && reboot
+                ;;
+            8) 
                 echo -e "\n${BOLD_RED}╔════════════════════════════════════════╗"
                 echo -e "║                                            ║"
                 echo -e "║          Modified By ${BOLD}Parham Pahlevan${NC}${BOLD_RED}          ║"
@@ -250,11 +299,6 @@ show_menu() {
     done
 }
 
-# Clean line endings (for Windows edited files)
-clean_script() {
-    sed -i 's/\r$//' "$0"
-}
-
-# Main Execution
+# Clean script and run
 clean_script
 show_menu
