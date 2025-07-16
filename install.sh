@@ -2,7 +2,7 @@
 
 # Global Configuration
 SCRIPT_NAME="BBR VIP Optimizer"
-SCRIPT_VERSION="2.5"
+SCRIPT_VERSION="2.6"
 AUTHOR="Parham Pahlevan"
 CONFIG_FILE="/etc/bbr_vip.conf"
 LOG_FILE="/var/log/bbr_vip.log"
@@ -159,21 +159,30 @@ configure_firewall() {
     fi
 }
 
-# Service Auto-Reset
+# Service Auto-Reset Configuration
 configure_auto_reset() {
-    local service_name=""
-    local interval=15
+    echo -e "\n${YELLOW}=== Service Auto-Restart Configuration ===${NC}"
     
-    echo -e "\n${YELLOW}=== Service Auto-Reset Configuration ===${NC}"
+    # Get service name
+    read -p "Enter service name to auto-restart (e.g., nginx, apache2): " service_name
     
-    read -p "Enter service name to auto-restart (e.g., x-ui, nginx): " service_name
-    read -p "Enter restart interval in minutes (default 15): " interval
-    
+    # Verify service exists and is active
     if ! systemctl is-active "$service_name" &>/dev/null; then
-        echo -e "${RED}Error: Service $service_name is not active!${NC}"
+        echo -e "${RED}Error: Service '$service_name' is not active or doesn't exist!${NC}"
         return 1
     fi
     
+    # Get interval with 15-minute default
+    read -p "Restart interval in minutes (default 15): " interval
+    interval=${interval:-15}
+    
+    # Validate input
+    if ! [[ "$interval" =~ ^[0-9]+$ ]] || [ "$interval" -lt 1 ] || [ "$interval" -gt 60 ]; then
+        echo -e "${RED}Error: Interval must be between 1-60 minutes!${NC}"
+        return 1
+    fi
+    
+    # Create cron job
     echo "*/$interval * * * * root systemctl restart $service_name >/dev/null 2>&1" > "$CRON_JOB_FILE"
     chmod 644 "$CRON_JOB_FILE"
     systemctl restart cron
