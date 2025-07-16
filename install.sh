@@ -1,289 +1,372 @@
 #!/bin/bash
 
-# Check for root privileges
-if [[ $EUID -ne 0 ]]; then
-    echo "This script requires root privileges. Please run with sudo or as the root user!"
-    exit 1
-fi
+# Global variables
+SCRIPT_NAME="BBR VIP Optimizer"
+SCRIPT_VERSION="2.1"
+AUTHOR="Parham Pahlevan"
+CONFIG_FILE="/etc/bbr_vip.conf"
+LOG_FILE="/var/log/bbr_vip.log"
+SYSCTL_BACKUP="/etc/sysctl.conf.bak"
 
-# Default variables
-DEFAULT_MTU=1420
-DEFAULT_DNS1="1.1.1.1"
-DEFAULT_DNS2="8.8.8.8"
+# Initialize logging
+exec > >(tee -a "$LOG_FILE") 2>&1
 
-# Function to detect or select network interface
-select_network_interface() {
-    # Try common interfaces first
-    for iface in eth0 ens3; do
-        if ip link show "$iface" > /dev/null 2>&1; then
-            INTERFACE="$iface"
-            return 0
+# Color codes
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+# Check root
+check_root() {
+    if [[ $EUID -ne 0 ]]; then
+        echo -e "${RED}Error: This script must be run as root!${NC}"
+        exit 1
+    fi
+}
+
+# Detect distribution
+detect_os() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS=$ID
+        OS_VERSION=$VERSION_ID
+    else
+        echo -e "${RED}Error: Could not detect OS!${NC}"
+        exit 1
+    fi
+}
+
+# Network interface selection
+select_interface() {
+    interfaces=($(ip -o link show | awk -F': ' '{print $2}' | grep -v lo))
+    
+    if [ ${#interfaces[@]} -eq 1 ]; then
+        INTERFACE=${interfaces[0]}
+        echo -e "${GREEN}Auto-selected interface: $INTERFACE${NC}"
+        return
+    fi
+
+    echo -e "${YELLOW}Available network interfaces:${NC}"
+    PS3="Please select interface (1-${#interfaces[@]}): "
+    select INTERFACE in "${interfaces[@]}"; do
+        if [ -n "$INTERFACE" ]; then
+            break
+        else
+            echo -e "${RED}Invalid selection!${NC}"
+        continue
         fi
     done
-
-    # If no common interface is found, list available interfaces
-    echo "No common network interface (eth0 or ens3) found!"
-    echo "Available network interfaces:"
-    ip link show | grep -E '^[0-9]+: ' | awk '{print $2}' | sed 's/://' | while read -r iface; do
-        echo "- $iface"
-    done
-    read -p "Please enter the network interface name: " INTERFACE
-    if ip link show "$INTERFACE" > /dev/null 2>&1; then
-        echo "Selected interface: $INTERFACE"
-    else
-        echo "Invalid interface $INTERFACE! Exiting."
-        exit 1
-    fi
 }
 
-# Select network interface
-select_network_interface
-
-# Backup original sysctl.conf
-SYSCTL_BACKUP="/etc/sysctl.conf.bak"
-if [ ! -f "$SYSCTL_BACKUP" ]; then
-    cp /etc/sysctl.conf "$SYSCTL_BACKUP"
-fi
-
-# Function to install optimizations
-install_optimizations() {
-    echo "Installing BBR VIP optimizations by Parham Pahlevan..."
-
-    # Set default MTU
-    echo "Setting MTU to $DEFAULT_MTU for interface $INTERFACE..."
-    ip link set dev "$INTERFACE" mtu $DEFAULT_MTU
-    if [ $? -eq 0 ]; then
-        echo "MTU successfully set to $DEFAULT_MTU."
-    else
-        echo "Error setting MTU! Please check the network interface or permissions."
-        exit 1
+# Kernel version check
+check_kernel_version() {
+    local required="4.9"
+    local current=$(uname -r | cut -d. -f1-2)
+    
+    if (( $(echo "$current < $required" | bc -l) )); then
+        echo -e "${RED}Warning: Kernel $current is too old for BBR. Minimum required: $required${NC}"
+        return 1
     fi
+    return 0
+}
 
-    # Apply TCP and network optimizations
-    echo "Applying TCP optimizations for streaming and downloading..."
-
-    # TCP Keepalive for connection stability
-    sysctl -w net.ipv4.tcp_keepalive_time=300
-    sysctl -w net.ipv4.tcp_keepalive_intvl=60
-    sysctl -w net.ipv4.tcp_keepalive_probes=10
-
-    # Increase connection limits
-    sysctl -w net.core.somaxconn=65535
-    sysctl -w net.ipv4.tcp_max_syn_backlog=8192
-    sysctl -w net.core.netdev_max_backlog=5000
-    sysctl -w net.ipv4.tcp_max_tw_buckets=200000
-
-    # Enhance BBR for streaming and downloading
-    sysctl -w net.core.default_qdisc=fq_codel
-    if sysctl -w net.ipv4.tcp_congestion_control=bbr 2>/dev/null; then
-        echo "BBR successfully enabled."
-    else
-        echo "BBR not supported, attempting to enable BBRv2..."
-        modprobe tcp_bbr
+# BBR configuration
+configure_bbr() {
+    echo -e "${YELLOW}Configuring TCP congestion control...${NC}"
+    
+    # Try BBRv2 first
+    if modprobe tcp_bbr2 2>/dev/null; then
+        sysctl -w net.ipv4.tcp_congestion_control=bbr2
+        echo -e "${GREEN}BBRv2 enabled successfully!${NC}"
+    elif modprobe tcp_bbr; then
         sysctl -w net.ipv4.tcp_congestion_control=bbr
+        echo -e "${GREEN}BBRv1 enabled successfully!${NC}"
+    else
+        sysctl -w net.ipv4.tcp_congestion_control=cubic
+        echo -e "${RED}BBR not available. Falling back to Cubic.${NC}"
+        return 1
     fi
 
-    # Additional settings for low latency and streaming
-    sysctl -w net.ipv4.tcp_low_latency=1
-    sysctl -w net.ipv4.tcp_window_scaling=1
-    sysctl -w net.ipv4.tcp_sack=1
-    sysctl -w net.ipv4.tcp_no_metrics_save=0
-    sysctl -w net.ipv4.tcp_ecn=1
-    sysctl -w net.ipv4.tcp_adv_win_scale=1
-    sysctl -w net.ipv4.tcp_moderate_rcvbuf=1
-
-    # Optimize TCP Fast Open
-    sysctl -w net.ipv4.tcp_fastopen=3
-
-    # Optimize MTU and MSS
-    sysctl -w net.ipv4.tcp_mtu_probing=1
-    sysctl -w net.ipv4.tcp_base_mss=1024
-
-    # Optimize TCP buffers
-    sysctl -w net.ipv4.tcp_rmem='4096 87380 8388608'
-    sysctl -w net.ipv4.tcp_wmem='4096 16384 8388608'
-    sysctl -w net.core.rmem_max=16777216
-    sysctl -w net.core.wmem_max=16777216
-
-    # Save settings to /etc/sysctl.conf
-    echo "Saving settings to /etc/sysctl.conf..."
-    cat <<EOT > /etc/sysctl.conf
-net.ipv4.tcp_keepalive_time=300
-net.ipv4.tcp_keepalive_intvl=60
-net.ipv4.tcp_keepalive_probes=10
-net.core.somaxconn=65535
-net.ipv4.tcp_max_syn_backlog=8192
-net.core.netdev_max_backlog=5000
-net.ipv4.tcp_max_tw_buckets=200000
-net.core.default_qdisc=fq_codel
-net.ipv4.tcp_congestion_control=bbr
-net.ipv4.tcp_low_latency=1
-net.ipv4.tcp_window_scaling=1
-net.ipv4.tcp_sack=1
-net.ipv4.tcp_no_metrics_save=0
-net.ipv4.tcp_ecn=1
-net.ipv4.tcp_adv_win_scale=1
-net.ipv4.tcp_moderate_rcvbuf=1
-net.ipv4.tcp_fastopen=3
-net.ipv4.tcp_mtu_probing=1
-net.ipv4.tcp_base_mss=1024
-net.ipv4.tcp_rmem=4096 87380 8388608
-net.ipv4.tcp_wmem=4096 16384 8388608
-net.core.rmem_max=16777216
-net.core.wmem_max=16777216
-EOT
-
-    # Apply sysctl settings
-    sysctl -p
-
-    # Set CPU and IO priority for ReverseTlsTunnel service
-    echo "Setting CPU and IO priority for ReverseTlsTunnel service..."
-    systemctl set-property rtt.service CPUSchedulingPolicy=rr IOSchedulingPriority=2 2>/dev/null
-    if [ $? -ne 0 ]; then
-        echo "Error setting priority for rtt service. Please check if the rtt service exists."
+    # Configure qdisc
+    if modprobe sch_cake 2>/dev/null; then
+        sysctl -w net.core.default_qdisc=cake
+    else
+        sysctl -w net.core.default_qdisc=fq_codel
     fi
-
-    # Disable ufw
-    echo "Disabling ufw..."
-    ufw disable
-
-    # Set default DNS
-    echo "Setting default DNS servers ($DEFAULT_DNS1, $DEFAULT_DNS2)..."
-    echo "nameserver $DEFAULT_DNS1" > /etc/resolv.conf
-    echo "nameserver $DEFAULT_DNS2" >> /etc/resolv.conf
-
-    echo "BBR VIP optimizations installed successfully!"
+    
+    return 0
 }
 
-# Function to uninstall optimizations
-uninstall_optimizations() {
-    echo "Uninstalling BBR VIP optimizations..."
+# TCP optimization
+optimize_tcp() {
+    echo -e "${YELLOW}Applying TCP optimizations...${NC}"
+    
+    cat << EOF > /etc/sysctl.d/60-bbr-optimizations.conf
+# Connection management
+net.ipv4.tcp_keepalive_time = 300
+net.ipv4.tcp_keepalive_intvl = 60
+net.ipv4.tcp_keepalive_probes = 10
+net.core.somaxconn = 65535
+net.ipv4.tcp_max_syn_backlog = 8192
+net.core.netdev_max_backlog = 5000
+net.ipv4.tcp_max_tw_buckets = 200000
 
-    # Restore original sysctl.conf
+# Performance tuning
+net.ipv4.tcp_low_latency = 1
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_no_metrics_save = 0
+net.ipv4.tcp_adv_win_scale = 1
+net.ipv4.tcp_moderate_rcvbuf = 1
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_base_mss = 1024
+
+# Buffer settings
+net.ipv4.tcp_rmem = 4096 87380 8388608
+net.ipv4.tcp_wmem = 4096 16384 8388608
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+EOF
+
+    sysctl --system
+}
+
+# Network configuration
+configure_network() {
+    echo -e "${YELLOW}Configuring network settings...${NC}"
+    
+    # MTU configuration
+    local target_mtu=${1:-1420}
+    ip link set dev "$INTERFACE" mtu "$target_mtu"
+    
+    # Persistent MTU setting
+    case $OS in
+        ubuntu|debian)
+            if [ -f "/etc/netplan/01-netcfg.yaml" ]; then
+                sed -i "/$INTERFACE:/,/mtu:/ s/mtu:.*/mtu: $target_mtu/" /etc/netplan/01-netcfg.yaml
+                netplan apply
+            fi
+            ;;
+        centos|rhel)
+            if [ -f "/etc/sysconfig/network-scripts/ifcfg-$INTERFACE" ]; then
+                sed -i "/MTU=/d" "/etc/sysconfig/network-scripts/ifcfg-$INTERFACE"
+                echo "MTU=$target_mtu" >> "/etc/sysconfig/network-scripts/ifcfg-$INTERFACE"
+                systemctl restart network
+            fi
+            ;;
+    esac
+    
+    # DNS configuration
+    configure_dns "1.1.1.1" "8.8.8.8"
+    
+    # IPv6 configuration (optional)
+    read -p "Disable IPv6? (y/n): " disable_ipv6
+    if [[ "$disable_ipv6" =~ [yY] ]]; then
+        sysctl -w net.ipv6.conf.all.disable_ipv6=1
+        sysctl -w net.ipv6.conf.default.disable_ipv6=1
+        echo -e "${GREEN}IPv6 has been disabled.${NC}"
+    fi
+}
+
+# DNS configuration
+configure_dns() {
+    local dns1=${1:-"1.1.1.1"}
+    local dns2=${2:-"8.8.8.8"}
+    
+    echo -e "${YELLOW}Configuring DNS servers...${NC}"
+    
+    # Systemd-resolved
+    if systemctl is-active systemd-resolved &>/dev/null; then
+        mkdir -p /etc/systemd/resolved.conf.d/
+        cat << EOF > /etc/systemd/resolved.conf.d/bbr.conf
+[Resolve]
+DNS=$dns1 $dns2
+DNSOverTLS=opportunistic
+EOF
+        systemctl restart systemd-resolved
+        return
+    fi
+    
+    # Traditional resolv.conf
+    cat << EOF > /etc/resolv.conf
+nameserver $dns1
+nameserver $dns2
+EOF
+    
+    # For CentOS/RHEL
+    if [ -f "/etc/sysconfig/network-scripts/ifcfg-$INTERFACE" ]; then
+        sed -i "/DNS[12]=/d" "/etc/sysconfig/network-scripts/ifcfg-$INTERFACE"
+        echo "DNS1=$dns1" >> "/etc/sysconfig/network-scripts/ifcfg-$INTERFACE"
+        echo "DNS2=$dns2" >> "/etc/sysconfig/network-scripts/ifcfg-$INTERFACE"
+        systemctl restart network
+    fi
+}
+
+# Firewall configuration
+configure_firewall() {
+    echo -e "${YELLOW}Configuring firewall...${NC}"
+    
+    if command -v ufw &>/dev/null; then
+        ufw disable
+        echo -e "${GREEN}UFW firewall disabled.${NC}"
+    elif command -v firewalld &>/dev/null; then
+        systemctl stop firewalld
+        systemctl disable firewalld
+        echo -e "${GREEN}Firewalld disabled.${NC}"
+    elif command -v iptables &>/dev/null; then
+        iptables -F
+        iptables -X
+        iptables -Z
+        echo -e "${GREEN}IPTables rules cleared.${NC}"
+    fi
+}
+
+# Service prioritization
+prioritize_services() {
+    local service_name="ReverseTlsTunnel"
+    
+    if systemctl is-active "$service_name" &>/dev/null; then
+        systemctl set-property "$service_name" CPUSchedulingPolicy=rr
+        systemctl set-property "$service_name" IOSchedulingPriority=2
+        echo -e "${GREEN}Priority set for $service_name service.${NC}"
+    fi
+}
+
+# Installation
+install_optimizations() {
+    echo -e "\n${GREEN}=== $SCRIPT_NAME (v$SCRIPT_VERSION) ===${NC}"
+    echo -e "By ${YELLOW}$AUTHOR${NC}\n"
+    
+    check_root
+    detect_os
+    select_interface
+    check_kernel_version
+    
+    # Backup current settings
+    cp /etc/sysctl.conf "$SYSCTL_BACKUP"
+    
+    # Apply optimizations
+    configure_bbr
+    optimize_tcp
+    configure_network
+    configure_firewall
+    prioritize_services
+    
+    echo -e "\n${GREEN}Optimizations completed successfully!${NC}"
+    echo -e "A detailed log has been saved to ${YELLOW}$LOG_FILE${NC}"
+}
+
+# Uninstallation
+uninstall_optimizations() {
+    check_root
+    
+    echo -e "\n${YELLOW}=== Reverting optimizations ===${NC}"
+    
+    # Restore sysctl settings
     if [ -f "$SYSCTL_BACKUP" ]; then
-        echo "Restoring original /etc/sysctl.conf..."
         cp "$SYSCTL_BACKUP" /etc/sysctl.conf
         sysctl -p
+        rm -f /etc/sysctl.d/60-bbr-optimizations.conf
+        echo -e "${GREEN}System settings restored.${NC}"
     else
-        echo "No backup of sysctl.conf found! Resetting to minimal defaults..."
-        > /etc/sysctl.conf
-        sysctl -p
+        echo -e "${RED}No backup found! Manual restoration required.${NC}"
     fi
-
-    # Reset MTU to default (1500)
-    echo "Resetting MTU to 1500 for interface $INTERFACE..."
+    
+    # Reset network settings
     ip link set dev "$INTERFACE" mtu 1500
-
-    # Disable ufw
-    echo "Disabling ufw..."
-    ufw disable
-
-    # Reset DNS to system defaults
-    echo "Resetting DNS to system defaults..."
     echo "" > /etc/resolv.conf
-
-    echo "Optimizations uninstalled successfully!"
+    
+    # Restart network services
+    systemctl restart systemd-networkd 2>/dev/null || service networking restart 2>/dev/null
+    
+    echo -e "\n${GREEN}Optimizations have been removed.${NC}"
 }
 
-# Function to show status
-show_status() {
-    echo "Checking system status..."
-
-    # Check rtt service status
-    if systemctl is-active rtt.service >/dev/null 2>&1; then
-        echo "ReverseTlsTunnel (rtt) service: Active"
+# Status check
+check_status() {
+    echo -e "\n${YELLOW}=== Current System Status ===${NC}"
+    
+    # Kernel info
+    echo -e "\n${GREEN}Kernel Information:${NC}"
+    uname -r
+    
+    # BBR status
+    echo -e "\n${GREEN}TCP Congestion Control:${NC}"
+    sysctl net.ipv4.tcp_congestion_control | awk '{print $3}'
+    
+    # Qdisc status
+    echo -e "\n${GREEN}Queue Discipline:${NC}"
+    sysctl net.core.default_qdisc | awk '{print $3}'
+    
+    # Network info
+    echo -e "\n${GREEN}Network Interface ($INTERFACE):${NC}"
+    ip -o link show "$INTERFACE" | awk '{print "MTU:", $5}'
+    
+    # DNS info
+    echo -e "\n${GREEN}DNS Configuration:${NC}"
+    grep nameserver /etc/resolv.conf || echo "No DNS servers configured"
+    
+    # Firewall status
+    echo -e "\n${GREEN}Firewall Status:${NC}"
+    if command -v ufw &>/dev/null; then
+        ufw status | grep Status
+    elif command -v firewall-cmd &>/dev/null; then
+        firewall-cmd --state
     else
-        echo "ReverseTlsTunnel (rtt) service: Inactive or not found"
-    fi
-
-    # Check current MTU
-    CURRENT_MTU=$(ip link show "$INTERFACE" | grep -oP 'mtu \K\d+')
-    echo "Current MTU: $CURRENT_MTU"
-
-    # Check congestion control
-    CURRENT_BBR=$(sysctl -n net.ipv4.tcp_congestion_control)
-    echo "TCP Congestion Control: $CURRENT_BBR"
-
-    # Check DNS servers
-    echo "Current DNS servers:"
-    cat /etc/resolv.conf | grep nameserver || echo "No DNS servers configured."
-
-    # Check ufw status
-    if ufw status | grep -q "inactive"; then
-        echo "ufw: Disabled"
-    else
-        echo "ufw: Enabled"
-    fi
-}
-
-# Function to change MTU
-change_mtu() {
-    echo "Current MTU: $(ip link show "$INTERFACE" | grep -oP 'mtu \K\d+')"
-    read -p "Enter new MTU value (between 1280 and 1500, default $DEFAULT_MTU): " CUSTOM_MTU
-    if [[ "$CUSTOM_MTU" =~ ^[0-9]+$ && "$CUSTOM_MTU" -ge 1280 && "$CUSTOM_MTU" -le 1500 ]]; then
-        ip link set dev "$INTERFACE" mtu $CUSTOM_MTU
-        echo "MTU set to $CUSTOM_MTU."
-    else
-        echo "Invalid MTU value! Keeping current MTU."
+        echo "No active firewall detected"
     fi
 }
 
-# Function to change DNS
-change_dns() {
-    echo "Current DNS servers:"
-    cat /etc/resolv.conf | grep nameserver || echo "No DNS servers configured."
-    echo "Default DNS servers: $DEFAULT_DNS1, $DEFAULT_DNS2"
-    read -p "Do you want to change DNS servers? (y/n): " dns_choice
-    if [[ "$dns_choice" == "y" || "$dns_choice" == "Y" ]]; then
-        read -p "Enter first DNS server: " DNS1
-        read -p "Enter second DNS server (optional): " DNS2
-        if [[ -n "$DNS1" ]]; then
-            echo "nameserver $DNS1" > /etc/resolv.conf
-            if [[ -n "$DNS2" ]]; then
-                echo "nameserver $DNS2" >> /etc/resolv.conf
-            fi
-            echo "DNS servers updated successfully."
-        else
-            echo "No valid DNS server provided! Keeping current configuration."
-        fi
-    else
-        echo "Applying default DNS servers ($DEFAULT_DNS1, $DEFAULT_DNS2)..."
-        echo "nameserver $DEFAULT_DNS1" > /etc/resolv.conf
-        echo "nameserver $DEFAULT_DNS2" >> /etc/resolv.conf
-    fi
+# Interactive menu
+show_menu() {
+    while true; do
+        echo -e "\n${GREEN}=== $SCRIPT_NAME Menu ===${NC}"
+        echo "1. Install Optimizations"
+        echo "2. Uninstall Optimizations"
+        echo "3. Check System Status"
+        echo "4. Change MTU"
+        echo "5. Change DNS Servers"
+        echo "6. Reboot System"
+        echo "7. Exit"
+        
+        read -p "Select an option [1-7]: " choice
+        
+        case $choice in
+            1) install_optimizations ;;
+            2) uninstall_optimizations ;;
+            3) check_status ;;
+            4) 
+                read -p "Enter new MTU (68-9000): " new_mtu
+                if [[ "$new_mtu" =~ ^[0-9]+$ && "$new_mtu" -ge 68 && "$new_mtu" -le 9000 ]]; then
+                    configure_network "$new_mtu"
+                else
+                    echo -e "${RED}Invalid MTU value!${NC}"
+                fi
+                ;;
+            5)
+                read -p "Enter primary DNS: " dns1
+                read -p "Enter secondary DNS (optional): " dns2
+                configure_dns "$dns1" "$dns2"
+                ;;
+            6) 
+                read -p "Are you sure you want to reboot? (y/n): " confirm
+                [[ "$confirm" =~ [yY] ]] && reboot
+                ;;
+            7) exit 0 ;;
+            *) echo -e "${RED}Invalid option!${NC}" ;;
+        esac
+    done
 }
 
-# Function to reboot server
-reboot_server() {
-    read -p "Are you sure you want to reboot the server? (y/n): " reboot_choice
-    if [[ "$reboot_choice" == "y" || "$reboot_choice" == "Y" ]]; then
-        echo "Rebooting server..."
-        reboot
-    else
-        echo "Reboot canceled."
-    fi
-}
-
-# Menu
-while true; do
-    echo -e "\n=== BBR VIP By Parham Pahlevan ==="
-    echo "1. Install BBR VIP By Parham Pahlevan"
-    echo "2. Uninstall optimizations"
-    echo "3. Show status"
-    echo "4. Change MTU"
-    echo "5. Change DNS"
-    echo "6. Reboot"
-    echo "7. Exit"
-    read -p "Select an option [1-7]: " option
-
-    case $option in
-        1) install_optimizations ;;
-        2) uninstall_optimizations ;;
-        3) show_status ;;
-        4) change_mtu ;;
-        5) change_dns ;;
-        6) reboot_server ;;
-        7) echo "Exiting..."; exit 0 ;;
-        *) echo "Invalid option! Please select a number between 1 and 7." ;;
-    esac
-done
+# Main execution
+if [[ "$1" == "--install" ]]; then
+    install_optimizations
+elif [[ "$1" == "--uninstall" ]]; then
+    uninstall_optimizations
+elif [[ "$1" == "--status" ]]; then
+    check_status
+else
+    show_menu
+fi
