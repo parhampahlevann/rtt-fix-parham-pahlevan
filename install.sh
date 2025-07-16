@@ -2,7 +2,7 @@
 
 # Global Configuration
 SCRIPT_NAME="BBR VIP Optimizer"
-SCRIPT_VERSION="2.6"
+SCRIPT_VERSION="2.7"
 AUTHOR="Parham Pahlevan"
 CONFIG_FILE="/etc/bbr_vip.conf"
 LOG_FILE="/var/log/bbr_vip.log"
@@ -159,35 +159,59 @@ configure_firewall() {
     fi
 }
 
-# Service Auto-Reset Configuration
-configure_auto_reset() {
-    echo -e "\n${YELLOW}=== Service Auto-Restart Configuration ===${NC}"
+# Auto-Restart Services
+enable_cron_job() {
+    echo -e "\n${YELLOW}=== Enabling Auto-Restart ===${NC}"
     
-    # Get service name
-    read -p "Enter service name to auto-restart (e.g., nginx, apache2): " service_name
+    # Services to automatically restart
+    services=("x-ui" "xray")
     
-    # Verify service exists and is active
-    if ! systemctl is-active "$service_name" &>/dev/null; then
-        echo -e "${RED}Error: Service '$service_name' is not active or doesn't exist!${NC}"
-        return 1
+    # Default interval
+    interval=15
+    
+    # Create cron job for each service
+    for service in "${services[@]}"; do
+        if systemctl is-active "$service" &>/dev/null; then
+            echo "*/$interval * * * * root systemctl restart $service >/dev/null 2>&1" >> "$CRON_JOB_FILE"
+            echo -e "${GREEN}Auto-restart enabled for $service every $interval minutes${NC}"
+        else
+            echo -e "${YELLOW}Service $service is not active, skipping...${NC}"
+        fi
+    done
+    
+    # Set permissions and reload cron
+    if [ -f "$CRON_JOB_FILE" ]; then
+        chmod 644 "$CRON_JOB_FILE"
+        systemctl restart cron
+        echo -e "\n${GREEN}Cron job successfully activated!${NC}"
+    else
+        echo -e "${RED}No active services found to auto-restart!${NC}"
     fi
+}
+
+# Manual Cron Job Configuration
+manual_cron_job() {
+    echo -e "\n${YELLOW}=== Manual Cron Job Configuration ===${NC}"
     
-    # Get interval with 15-minute default
-    read -p "Restart interval in minutes (default 15): " interval
+    read -p "Enter service name to auto-restart: " service_name
+    read -p "Enter restart interval in minutes (default 15): " interval
     interval=${interval:-15}
     
-    # Validate input
-    if ! [[ "$interval" =~ ^[0-9]+$ ]] || [ "$interval" -lt 1 ] || [ "$interval" -gt 60 ]; then
-        echo -e "${RED}Error: Interval must be between 1-60 minutes!${NC}"
+    if ! systemctl is-active "$service_name" &>/dev/null; then
+        echo -e "${RED}Error: Service '$service_name' is not active!${NC}"
         return 1
     fi
     
-    # Create cron job
-    echo "*/$interval * * * * root systemctl restart $service_name >/dev/null 2>&1" > "$CRON_JOB_FILE"
+    if ! [[ "$interval" =~ ^[0-9]+$ ]] || [ "$interval" -lt 1 ]; then
+        echo -e "${RED}Error: Invalid interval!${NC}"
+        return 1
+    fi
+    
+    echo "*/$interval * * * * root systemctl restart $service_name >/dev/null 2>&1" >> "$CRON_JOB_FILE"
     chmod 644 "$CRON_JOB_FILE"
     systemctl restart cron
     
-    echo -e "${GREEN}Auto-restart configured for $service_name every $interval minutes!${NC}"
+    echo -e "${GREEN}Manual cron job added for $service_name every $interval minutes!${NC}"
 }
 
 # MTU Configuration
@@ -256,9 +280,11 @@ check_status() {
     echo -e "${BOLD}Interface MTU:${NC} $(ip link show $INTERFACE | grep -oP 'mtu \K\d+')"
     
     if [ -f "$CRON_JOB_FILE" ]; then
-        echo -e "\n${BOLD}Auto-Restart Service:${NC}"
-        echo "Service: $(awk '{print $6}' $CRON_JOB_FILE)"
-        echo "Interval: $(awk '{print $1}' $CRON_JOB_FILE | cut -d'/' -f2) minutes"
+        echo -e "\n${BOLD}Auto-Restart Services:${NC}"
+        grep -oP 'restart \K\w+' "$CRON_JOB_FILE" | while read service; do
+            interval=$(grep "$service" "$CRON_JOB_FILE" | awk '{print $1}' | cut -d'/' -f2)
+            echo "$service: every $interval minutes"
+        done
     fi
 }
 
@@ -272,11 +298,12 @@ show_menu() {
         echo "3. Check System Status"
         echo "4. Configure MTU"
         echo "5. Configure DNS"
-        echo "6. Configure Service Auto-Restart"
-        echo "7. Reboot System"
-        echo -e "8. ${BOLD_RED}Exit${NC}"
+        echo "6. Enable Cron Job (Auto-Restart)"
+        echo "7. Manual Cron Job Configuration"
+        echo "8. Reboot System"
+        echo -e "9. ${BOLD_RED}Exit${NC}"
         
-        read -p "Select an option [1-8]: " choice
+        read -p "Select an option [1-9]: " choice
         
         case $choice in
             1) install_optimizations ;;
@@ -288,12 +315,13 @@ show_menu() {
                 read -p "Enter secondary DNS: " dns2
                 configure_dns "$dns1" "$dns2"
                 ;;
-            6) configure_auto_reset ;;
-            7) 
+            6) enable_cron_job ;;
+            7) manual_cron_job ;;
+            8) 
                 read -p "Are you sure you want to reboot? (y/n): " confirm
                 [[ "$confirm" =~ [yY] ]] && reboot
                 ;;
-            8) 
+            9) 
                 echo -e "\n${BOLD_RED}╔════════════════════════════════════════╗"
                 echo -e "║                                            ║"
                 echo -e "║          Modified By ${BOLD}Parham Pahlevan${NC}${BOLD_RED}          ║"
