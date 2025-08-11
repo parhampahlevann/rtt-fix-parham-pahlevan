@@ -2,18 +2,18 @@
 
 # Global Configuration
 SCRIPT_NAME="BBR VIP Optimizer Pro"
-SCRIPT_VERSION="4.0"
+SCRIPT_VERSION="4.1"  # نسخه آپدیت‌شده
 AUTHOR="Parham Pahlevan"
 CONFIG_FILE="/etc/bbr_vip.conf"
 LOG_FILE="/var/log/bbr_vip.log"
 SYSCTL_BACKUP="/etc/sysctl.conf.bak"
-CRON_JOB_FILE="/etc/cron.d/bbr_vip_autoreset"
-# شناسایی همه اینترفیس‌های شبکه
-NETWORK_INTERFACES=$(ip link | awk -F: '$0 !~ "lo|vir|docker|br-|veth|wg" {print $2}' | tr -d ' ')
+CRON_JOB_FILE="/etc/cron.d/bbr_vip_autoresst"
+NETWORK_INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
 VIP_MODE=false
 VIP_SUBNET=""
 VIP_GATEWAY=""
 DEFAULT_MTU=1420
+CURRENT_MTU=$(cat /sys/class/net/$NETWORK_INTERFACE/mtu 2>/dev/null || echo $DEFAULT_MTU)
 DNS_SERVERS=("1.1.1.1")
 CURRENT_DNS=$(grep nameserver /etc/resolv.conf 2>/dev/null | awk '{print $2}' | tr '\n' ' ')
 OS=""
@@ -36,17 +36,14 @@ BOLD='\033[1m'
 # Header Display
 show_header() {
     clear
-    echo -e "${BLUE}${BOLD}╔═══════════════════════════════════════════════════════════╗"
+    echo -e "${BLUE}${BOLD}╔═════════════════════════════════════════════════════════╗"
     echo -e "║   ${SCRIPT_NAME} ${SCRIPT_VERSION} - ${AUTHOR}              ║"
-    echo -e "╚═══════════════════════════════════════════════════════════╝${NC}"
-    echo -e "${YELLOW}Network Interfaces: ${BOLD}${NETWORK_INTERFACES}${NC}"
+    echo -e "╚═════════════════════════════════════════════════════════╝${NC}"
+    echo -e "${YELLOW}Network Interface: ${BOLD}$NETWORK_INTERFACE${NC}"
     echo -e "${YELLOW}VIP Mode: ${BOLD}$([ "$VIP_MODE" = true ] && echo "Enabled" || echo "Disabled")${NC}"
-    echo -e "${YELLOW}Current DNS: ${BOLD}${CURRENT_DNS}${NC}"
-    echo -e "${YELLOW}OS Detected: ${BOLD}${OS} ${VER}${NC}\n"
-    for IFACE in $NETWORK_INTERFACES; do
-        CURRENT_MTU=$(cat /sys/class/net/$IFACE/mtu 2>/dev/null || echo $DEFAULT_MTU)
-        echo -e "${YELLOW}Current MTU ($IFACE): ${BOLD}${CURRENT_MTU}${NC}"
-    done
+    echo -e "${YELLOW}Current MTU: ${BOLD}$CURRENT_MTU${NC}"
+    echo -e "${YELLOW}Current DNS: ${BOLD}$CURRENT_DNS${NC}"
+    echo -e "${YELLOW}OS Detected: ${BOLD}$OS $VER${NC}\n"
 }
 
 # Check Root
@@ -77,6 +74,79 @@ detect_distro() {
         OS=$(uname -s)
         VER=$(uname -r)
     fi
+}
+
+# Configure MTU Permanently
+configure_mtu_permanent() {
+    echo -e "${YELLOW}Setting permanent MTU to $CURRENT_MTU for $NETWORK_INTERFACE...${NC}"
+    
+    if command -v nmcli >/dev/null 2>&1 && systemctl is-active NetworkManager >/dev/null 2>&1; then
+        # NetworkManager
+        CONNECTION=$(nmcli -t -f NAME,DEVICE connection show | grep "$NETWORK_INTERFACE" | cut -d: -f1)
+        if [[ -n "$CONNECTION" ]]; then
+            if ! nmcli connection modify "$CONNECTION" 802-3-ethernet.mtu "$CURRENT_MTU" 2>>"$LOG_FILE"; then
+                echo -e "${BOLD_RED}Error setting MTU with NetworkManager!${NC}"
+                return 1
+            fi
+            nmcli connection up "$CONNECTION" 2>>"$LOG_FILE"
+            echo -e "${GREEN}MTU set permanently with NetworkManager.${NC}"
+        else
+            echo -e "${BOLD_RED}No NetworkManager connection found for $NETWORK_INTERFACE!${NC}"
+            return 1
+        fi
+    
+    elif systemctl is-active systemd-networkd >/dev/null 2>&1; then
+        # systemd-networkd
+        cat <<EOF | tee /etc/systemd/network/20-$NETWORK_INTERFACE.network >/dev/null
+[Match]
+Name=$NETWORK_INTERFACE
+
+[Link]
+MTUBytes=$CURRENT_MTU
+EOF
+        if ! systemctl restart systemd-networkd 2>>"$LOG_FILE"; then
+            echo -e "${BOLD_RED}Error restarting systemd-networkd!${NC}"
+            return 1
+        fi
+        echo -e "${GREEN}MTU set permanently with systemd-networkd.${NC}"
+    
+    elif [[ -d /etc/sysconfig/network-scripts ]]; then
+        # CentOS/RHEL
+        IFCFG_FILE="/etc/sysconfig/network-scripts/ifcfg-$NETWORK_INTERFACE"
+        if [[ -f "$IFCFG_FILE" ]]; then
+            if ! grep -q "^MTU=" "$IFCFG_FILE"; then
+                echo "MTU=$CURRENT_MTU" >> "$IFCFG_FILE"
+            else
+                sed -i "s/^MTU=.*/MTU=$CURRENT_MTU/" "$IFCFG_FILE"
+            fi
+            if ! systemctl restart network 2>>"$LOG_FILE"; then
+                echo -e "${BOLD_RED}Error restarting network service!${NC}"
+                return 1
+            fi
+            echo -e "${GREEN}MTU set permanently in $IFCFG_FILE.${NC}"
+        else
+            echo -e "${BOLD_RED}No config file found for $NETWORK_INTERFACE!${NC}"
+            return 1
+        fi
+    
+    elif [[ -f /etc/network/interfaces ]]; then
+        # Debian/Ubuntu
+        if ! grep -q "iface $NETWORK_INTERFACE" /etc/network/interfaces; then
+            echo -e "\nauto $NETWORK_INTERFACE\niface $NETWORK_INTERFACE inet dhcp\n    mtu $CURRENT_MTU" >> /etc/network/interfaces
+        else
+            sed -i "/iface $NETWORK_INTERFACE inet/{n;s/mtu .*/mtu $CURRENT_MTU/}" /etc/network/interfaces
+        fi
+        if ! systemctl restart networking 2>>"$LOG_FILE"; then
+            echo -e "${BOLD_RED}Error restarting networking service!${NC}"
+            return 1
+        fi
+        echo -e "${GREEN}MTU set permanently in /etc/network/interfaces.${NC}"
+    
+    else
+        echo -e "${BOLD_RED}Unknown network management system! Please set MTU manually.${NC}"
+        return 1
+    fi
+    return 0
 }
 
 # Load Configuration
@@ -120,19 +190,10 @@ load_config() {
             "net.ipv4.tcp_low_latency=1"
         )
         
-        # Apply default MTU and DNS
-        for IFACE in $NETWORK_INTERFACES; do
-            ip link set dev "$IFACE" mtu $DEFAULT_MTU 2>/dev/null
-            # ذخیره دائمی MTU
-            if command -v nmcli >/dev/null 2>&1; then
-                nmcli con mod "$IFACE" ethernet.mtu "$DEFAULT_MTU" 2>/dev/null
-                nmcli con up "$IFACE" 2>/dev/null
-            elif [ -f /etc/network/interfaces ]; then
-                sed -i "/iface $IFACE inet dhcp/,+1d" /etc/network/interfaces
-                echo "iface $IFACE inet dhcp" >> /etc/network/interfaces
-                echo "    mtu $DEFAULT_MTU" >> /etc/network/interfaces
-            fi
-        done
+        # Apply default MTU
+        ip link set dev "$NETWORK_INTERFACE" mtu "$DEFAULT_MTU" 2>>"$LOG_FILE"
+        CURRENT_MTU=$DEFAULT_MTU
+        configure_mtu_permanent
         update_dns
         save_config
     fi
@@ -140,34 +201,11 @@ load_config() {
 
 # Update DNS Configuration
 update_dns() {
-    # غیرفعال کردن مدیریت resolv.conf توسط systemd-resolved
-    if systemctl is-active --quiet systemd-resolved; then
-        systemctl disable --now systemd-resolved 2>/dev/null
-        rm -f /etc/resolv.conf
-    fi
-    
-    # باز کردن قفل resolv.conf
-    chattr -i /etc/resolv.conf 2>/dev/null
-    
-    # به‌روزرسانی resolv.conf
     echo "# Generated by $SCRIPT_NAME" > /etc/resolv.conf
-    for DNS in "${DNS_SERVERS[@]}"; do
-        echo "nameserver $DNS" >> /etc/resolv.conf
+    for dns in "${DNS_SERVERS[@]}"; do
+        echo "nameserver $dns" >> /etc/resolv.conf
     done
     CURRENT_DNS="${DNS_SERVERS[*]}"
-    
-    # قفل کردن resolv.conf
-    chattr +i /etc/resolv.conf 2>/dev/null
-    
-    # تنظیم DNS برای NetworkManager
-    if command -v nmcli >/dev/null 2>&1; then
-        for IFACE in $NETWORK_INTERFACES; do
-            nmcli con mod "$IFACE" ipv4.dns "${DNS_SERVERS[*]}" 2>/dev/null
-            nmcli con mod "$IFACE" ipv4.ignore-auto-dns yes 2>/dev/null
-            nmcli con up "$IFACE" 2>/dev/null
-        done
-        systemctl restart NetworkManager 2>/dev/null
-    fi
 }
 
 # Backup current sysctl settings
@@ -183,6 +221,7 @@ apply_kernel_params() {
     echo -e "${YELLOW}Applying optimized kernel parameters...${NC}"
     
     local temp_file=$(mktemp)
+    
     while IFS= read -r line; do
         local skip_line=false
         for param in "${DEFAULT_KERNEL_PARAMS[@]}" "${VIP_KERNEL_PARAMS[@]}"; do
@@ -200,6 +239,7 @@ apply_kernel_params() {
         for param in "${DEFAULT_KERNEL_PARAMS[@]}"; do
             echo "$param"
         done
+        
         if [ "$VIP_MODE" = true ]; then
             echo -e "\n# VIP Optimization Parameters"
             for param in "${VIP_KERNEL_PARAMS[@]}"; do
@@ -209,7 +249,8 @@ apply_kernel_params() {
     } >> "$temp_file"
     
     mv "$temp_file" /etc/sysctl.conf
-    if ! sysctl -p >/dev/null 2>&1; then
+    
+    if ! sysctl -p >>"$LOG_FILE" 2>&1; then
         echo -e "${BOLD_RED}Error applying sysctl settings!${NC}"
         return 1
     fi
@@ -245,7 +286,7 @@ verify_bbr() {
 
 # Setup Cron Job for Auto Reset
 setup_cron_job() {
-    local cron_time="0 4 * * *"
+    local cron_time="0 4 * * *"  # Default: 4 AM daily
     local script_path=$(readlink -f "$0")
     
     echo -e "${YELLOW}Setting up cron job for auto-reset...${NC}"
@@ -282,32 +323,18 @@ reset_network() {
             return 1
         fi
         
-        if ! sysctl -p >/dev/null 2>&1; then
+        if ! sysctl -p >>"$LOG_FILE" 2>&1; then
             echo -e "${BOLD_RED}Error applying restored settings!${NC}"
             return 1
         fi
         
         # Reset MTU to default
-        for IFACE in $NETWORK_INTERFACES; do
-            ip link set dev "$IFACE" mtu $DEFAULT_MTU 2>/dev/null
-            if command -v nmcli >/dev/null 2>&1; then
-                nmcli con mod "$IFACE" ethernet.mtu $DEFAULT_MTU 2>/dev/null
-                nmcli con up "$IFACE" 2>/dev/null
-            elif [ -f /etc/network/interfaces ]; then
-                sed -i "/iface $IFACE inet dhcp/,+1d" /etc/network/interfaces
-                echo "iface $IFACE inet dhcp" >> /etc/network/interfaces
-                echo "    mtu $DEFAULT_MTU" >> /etc/network/interfaces
-            fi
-        done
         CURRENT_MTU=$DEFAULT_MTU
-        
-        # Reset DNS to Google DNS
-        DNS_SERVERS=("8.8.8.8" "8.8.4.4")
-        chattr -i /etc/resolv.conf 2>/dev/null
+        ip link set dev "$NETWORK_INTERFACE" mtu "$CURRENT_MTU" 2>>"$LOG_FILE"
+        configure_mtu_permanent
         update_dns
         
         echo -e "${GREEN}Network settings restored from backup!${NC}"
-        
         restart_network_services
         return 0
     else
@@ -322,16 +349,13 @@ restart_network_services() {
     
     case $OS in
         *Ubuntu*|*Debian*)
-            systemctl restart networking 2>/dev/null || service networking restart 2>/dev/null
-            systemctl restart NetworkManager 2>/dev/null
+            systemctl restart networking 2>>"$LOG_FILE" || service networking restart 2>>"$LOG_FILE"
             ;;
         *CentOS*|*Red*Hat*|*Fedora*)
-            systemctl restart network 2>/dev/null || service network restart 2>/dev/null
-            systemctl restart NetworkManager 2>/dev/null
+            systemctl restart network 2>>"$LOG_FILE" || service network restart 2>>"$LOG_FILE"
             ;;
         *Arch*)
-            systemctl restart systemd-networkd 2>/dev/null
-            systemctl restart NetworkManager 2>/dev/null
+            systemctl restart systemd-networkd 2>>"$LOG_FILE"
             ;;
         *)
             echo -e "${YELLOW}Unknown OS! Please restart network manually.${NC}"
@@ -363,20 +387,14 @@ configure_vip() {
         VIP_GATEWAY=""
         echo -e "${YELLOW}VIP Mode disabled${NC}"
     fi
-    
     save_config
 }
 
 # Configure MTU
 configure_mtu() {
     echo -e "\n${YELLOW}Configuring Network Interface MTU${NC}"
-    
-    for IFACE in $NETWORK_INTERFACES; do
-        CURRENT_MTU=$(cat /sys/class/net/$IFACE/mtu 2>/dev/null || echo $DEFAULT_MTU)
-        echo -e "Current MTU ($IFACE): ${BOLD}$CURRENT_MTU${NC}"
-    done
-    
-    read -p "Do you want to change MTU for all interfaces? (y/n): " change_mtu
+    echo -e "Current MTU: ${BOLD}$CURRENT_MTU${NC}"
+    read -p "Do you want to change MTU? (y/n): " change_mtu
     
     if [[ "$change_mtu" =~ ^[Yy] ]]; then
         read -p "Enter new MTU value (recommended: 1420): " new_mtu
@@ -386,23 +404,15 @@ configure_mtu() {
             return 1
         fi
         
-        for IFACE in $NETWORK_INTERFACES; do
-            if ! ip link set dev "$IFACE" mtu $new_mtu 2>/dev/null; then
-                echo -e "${BOLD_RED}Error setting MTU for $IFACE!${NC}"
-                continue
-            fi
-            if command -v nmcli >/dev/null 2>&1; then
-                nmcli con mod "$IFACE" ethernet.mtu "$new_mtu" 2>/dev/null
-                nmcli con up "$IFACE" 2>/dev/null
-            elif [ -f /etc/network/interfaces ]; then
-                sed -i "/iface $IFACE inet dhcp/,+1d" /etc/network/interfaces
-                echo "iface $IFACE inet dhcp" >> /etc/network/interfaces
-                echo "    mtu $new_mtu" >> /etc/network/interfaces
-            fi
-            echo -e "${GREEN}MTU for $IFACE set to $new_mtu${NC}"
-        done
+        echo -e "${YELLOW}Setting temporary MTU to $new_mtu for $NETWORK_INTERFACE...${NC}"
+        if ! ip link set dev "$NETWORK_INTERFACE" mtu "$new_mtu" 2>>"$LOG_FILE"; then
+            echo -e "${BOLD_RED}Error setting temporary MTU!${NC}"
+            return 1
+        fi
         
         CURRENT_MTU=$new_mtu
+        configure_mtu_permanent
+        echo -e "${GREEN}MTU successfully changed to $new_mtu!${NC}"
         save_config
     fi
 }
@@ -410,7 +420,6 @@ configure_mtu() {
 # Configure DNS
 configure_dns() {
     echo -e "\n${YELLOW}Configuring DNS Servers${NC}"
-    
     echo -e "Current DNS: ${BOLD}$CURRENT_DNS${NC}"
     read -p "Do you want to change DNS servers? (y/n): " change_dns
     
@@ -436,10 +445,8 @@ configure_dns() {
         
         DNS_SERVERS=("${valid_dns[@]}")
         update_dns
-        
         echo -e "${GREEN}DNS servers updated successfully!${NC}"
         echo -e "New DNS: ${BOLD}${DNS_SERVERS[@]}${NC}"
-        
         save_config
     fi
 }
@@ -447,7 +454,6 @@ configure_dns() {
 # Save Configuration
 save_config() {
     echo -e "${YELLOW}Saving configuration to $CONFIG_FILE...${NC}"
-    
     cat > "$CONFIG_FILE" <<EOL
 # BBR VIP Optimizer Configuration
 ENABLE_BBR=$ENABLE_BBR
@@ -459,9 +465,7 @@ VIP_SUBNET="$VIP_SUBNET"
 VIP_GATEWAY="$VIP_GATEWAY"
 MTU=$CURRENT_MTU
 DNS_SERVERS=(${DNS_SERVERS[@]})
-NETWORK_INTERFACES="$NETWORK_INTERFACES"
 EOL
-
     echo -e "${GREEN}Configuration saved successfully!${NC}"
 }
 
@@ -471,8 +475,8 @@ test_speed() {
     
     if ! command -v speedtest-cli &> /dev/null; then
         echo -e "${YELLOW}Installing speedtest-cli...${NC}"
-        if pip install speedtest-cli 2>/dev/null || apt-get install -y speedtest-cli 2>/dev/null || \
-           yum install -y speedtest-cli 2>/dev/null || dnf install -y speedtest-cli 2>/dev/null; then
+        if pip install speedtest-cli 2>>"$LOG_FILE" || apt-get install -y speedtest-cli 2>>"$LOG_FILE" || \
+           yum install -y speedtest-cli 2>>"$LOG_FILE" || dnf install -y speedtest-cli 2>>"$LOG_FILE"; then
             echo -e "${GREEN}speedtest-cli installed successfully!${NC}"
         else
             echo -e "${BOLD_RED}Could not install speedtest-cli. Please install it manually.${NC}"
@@ -481,10 +485,10 @@ test_speed() {
     fi
     
     echo -e "${CYAN}Testing download and upload speed...${NC}"
-    speedtest-cli --simple
+    speedtest-cli --simple >>"$LOG_FILE" 2>&1
     
     echo -e "\n${CYAN}Testing latency to 1.1.1.1...${NC}"
-    ping -c 5 1.1.1.1 | grep -A1 "statistics"
+    ping -c 5 1.1.1.1 | grep -A1 "statistics" | tee -a "$LOG_FILE"
 }
 
 # Show Current Settings
@@ -493,11 +497,8 @@ show_settings() {
     echo -e "BBR Enabled: ${BOLD}$ENABLE_BBR${NC}"
     echo -e "TCP Fast Open: ${BOLD}$TCP_FASTOPEN${NC}"
     echo -e "VIP Mode: ${BOLD}$VIP_MODE${NC}"
+    echo -e "MTU: ${BOLD}$CURRENT_MTU${NC}"
     echo -e "DNS Servers: ${BOLD}${DNS_SERVERS[@]}${NC}"
-    
-    for IFACE in $NETWORK_INTERFACES; do
-        echo -e "MTU ($IFACE): ${BOLD}$(cat /sys/class/net/$IFACE/mtu 2>/dev/null || echo $DEFAULT_MTU)${NC}"
-    done
     
     if [ "$VIP_MODE" = true ]; then
         echo -e "VIP Subnet: ${BOLD}$VIP_SUBNET${NC}"
@@ -505,12 +506,10 @@ show_settings() {
     fi
     
     echo -e "\n${YELLOW}Current Kernel Parameters:${NC}"
-    sysctl -a 2>/dev/null | grep -E "net.core.default_qdisc|net.ipv4.tcp_congestion_control|net.ipv4.tcp_fastopen"
+    sysctl -a 2>/dev/null | grep -E "net.core.default_qdisc|net.ipv4.tcp_congestion_control|net.ipv4.tcp_fastopen" | tee -a "$LOG_FILE"
     
     echo -e "\n${YELLOW}Interface Settings:${NC}"
-    for IFACE in $NETWORK_INTERFACES; do
-        echo -e "Current Interface MTU ($IFACE): ${BOLD}$(cat /sys/class/net/$IFACE/mtu 2>/dev/null)${NC}"
-    done
+    echo -e "Current Interface MTU: ${BOLD}$(cat /sys/class/net/$NETWORK_INTERFACE/mtu 2>/dev/null)${NC}"
 }
 
 # Uninstall All Changes
@@ -519,7 +518,7 @@ uninstall_all() {
     
     if [[ -f "$SYSCTL_BACKUP" ]]; then
         cp "$SYSCTL_BACKUP" /etc/sysctl.conf
-        sysctl -p
+        sysctl -p >>"$LOG_FILE" 2>&1
         echo -e "${GREEN}Restored original sysctl settings${NC}"
     fi
     
@@ -529,36 +528,14 @@ uninstall_all() {
     rm -f "$CRON_JOB_FILE"
     echo -e "${GREEN}Removed cron job${NC}"
     
-    for IFACE in $NETWORK_INTERFACES; do
-        ip link set dev "$IFACE" mtu 1500 2>/dev/null
-        if command -v nmcli >/dev/null 2>&1; then
-            nmcli con mod "$IFACE" ethernet.mtu 1500 2>/dev/null
-            nmcli con up "$IFACE" 2>/dev/null
-        elif [ -f /etc/network/interfaces ]; then
-            sed -i "/iface $IFACE inet dhcp/,+1d" /etc/network/interfaces
-            echo "iface $IFACE inet dhcp" >> /etc/network/interfaces
-            echo "    mtu 1500" >> /etc/network/interfaces
-        fi
-    done
+    ip link set dev "$NETWORK_INTERFACE" mtu 1500 2>>"$LOG_FILE"
+    CURRENT_MTU=1500
+    configure_mtu_permanent
     echo -e "${GREEN}Reset MTU to default 1500${NC}"
     
-    chattr -i /etc/resolv.conf 2>/dev/null
     echo "nameserver 8.8.8.8" > /etc/resolv.conf
     echo "nameserver 8.8.4.4" >> /etc/resolv.conf
-    if command -v nmcli >/dev/null 2>&1; then
-        for IFACE in $NETWORK_INTERFACES; do
-            nmcli con mod "$IFACE" ipv4.dns "8.8.8.8 8.8.4.4" 2>/dev/null
-            nmcli con mod "$IFACE" ipv4.ignore-auto-dns yes 2>/dev/null
-            nmcli con up "$IFACE" 2>/dev/null
-        done
-    fi
-    chattr +i /etc/resolv.conf 2>/dev/null
     echo -e "${GREEN}Reset DNS to Google DNS${NC}"
-    
-    # فعال کردن مجدد systemd-resolved (در صورت نیاز)
-    if command -v systemctl >/dev/null 2>&1; then
-        systemctl enable --now systemd-resolved 2>/dev/null
-    fi
     
     echo -e "\n${GREEN}Uninstallation complete!${NC}"
     read -p "Press [Enter] to continue..."
