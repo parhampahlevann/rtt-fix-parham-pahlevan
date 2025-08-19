@@ -1,12 +1,18 @@
 #!/bin/bash
 # Global Configuration
 SCRIPT_NAME="Ultimate Network Optimizer"
-SCRIPT_VERSION="8.6"
+SCRIPT_VERSION="8.7"  # نسخه به‌روزرسانی شده
 AUTHOR="Parham Pahleven"
 CONFIG_FILE="/etc/network_optimizer.conf"
 LOG_FILE="/var/log/network_optimizer.log"
-NETWORK_INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
 DEFAULT_MTU=1500
+
+# پیدا کردن رابط شبکه به‌صورت پویا
+NETWORK_INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
+if [ -z "$NETWORK_INTERFACE" ]; then
+    echo -e "\033[0;31mError: No default network interface detected! Please check your network configuration.\033[0m"
+    exit 1
+fi
 CURRENT_MTU=$(cat /sys/class/net/"$NETWORK_INTERFACE"/mtu 2>/dev/null || echo $DEFAULT_MTU)
 DNS_SERVERS=("1.1.1.1" "1.0.0.1")
 CURRENT_DNS=$(grep nameserver /etc/resolv.conf 2>/dev/null | awk '{print $2}' | tr '\n' ' ')
@@ -152,34 +158,61 @@ ping_mtu() {
 configure_mtu() {
     local new_mtu=$1
     local old_mtu=$(cat /sys/class/net/"$NETWORK_INTERFACE"/mtu 2>/dev/null || echo $DEFAULT_MTU)
+
+    # بررسی وجود رابط شبکه
+    if [ -z "$NETWORK_INTERFACE" ] || ! ip link show "$NETWORK_INTERFACE" >/dev/null 2>&1; then
+        echo -e "${RED}Error: Network interface '$NETWORK_INTERFACE' not found or invalid!${NC}"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: Invalid network interface '$NETWORK_INTERFACE'" >> "$LOG_FILE"
+        return 1
+    fi
+
+    # بررسی معتبر بودن مقدار MTU
     if [[ ! "$new_mtu" =~ ^[0-9]+$ || $new_mtu -lt 68 || $new_mtu -gt 9000 ]]; then
         echo -e "${RED}Invalid MTU value! Must be between 68 and 9000.${NC}"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: Invalid MTU value '$new_mtu'" >> "$LOG_FILE"
         return 1
     fi
+
     echo -e "${YELLOW}Setting MTU to $new_mtu on $NETWORK_INTERFACE...${NC}"
-    
-    # Set temporary MTU
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Setting MTU to $new_mtu on $NETWORK_INTERFACE" >> "$LOG_FILE"
+
+    # بررسی وضعیت رابط شبکه
+    if ! ip link show "$NETWORK_INTERFACE" | grep -q "state UP"; then
+        echo -e "${YELLOW}Bringing up network interface $NETWORK_INTERFACE...${NC}"
+        if ! ip link set "$NETWORK_INTERFACE" up 2>/dev/null; then
+            echo -e "${RED}Failed to bring up network interface!${NC}"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: Failed to bring up interface '$NETWORK_INTERFACE'" >> "$LOG_FILE"
+            return 1
+        fi
+    fi
+
+    # تنظیم MTU موقت
     if ! ip link set dev "$NETWORK_INTERFACE" mtu "$new_mtu" 2>/dev/null; then
         echo -e "${RED}Failed to set temporary MTU!${NC}"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: Failed to set MTU to $new_mtu on $NETWORK_INTERFACE" >> "$LOG_FILE"
         return 1
     fi
-    
-    # Update kernel MTU file
-    echo "$new_mtu" > "/sys/class/net/$NETWORK_INTERFACE/mtu" 2>/dev/null
-    
-    # Test connectivity
+
+    # به‌روزرسانی فایل MTU در کرنل
+    if ! echo "$new_mtu" > "/sys/class/net/$NETWORK_INTERFACE/mtu" 2>/dev/null; then
+        echo -e "${YELLOW}Warning: Could not update MTU via sysfs${NC}"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Warning: Failed to update MTU via sysfs" >> "$LOG_FILE"
+    fi
+
+    # تست اتصال
     echo -e "${YELLOW}Testing connectivity with new MTU...${NC}"
     sleep 2
     if ! _test_connectivity; then
         echo -e "${RED}Connectivity test failed! Rolling back MTU...${NC}"
-        ip link set dev "$NETWORK_INTERFACE" mtu "$old_mtu"
+        ip link set dev "$NETWORK_INTERFACE" mtu "$old_mtu" 2>/dev/null
         echo "$old_mtu" > "/sys/class/net/$NETWORK_INTERFACE/mtu" 2>/dev/null
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: Connectivity test failed, rolled back to MTU $old_mtu" >> "$LOG_FILE"
         return 1
     fi
-    
-    # Apply permanent configuration
+
+    # اعمال تنظیمات دائمی
     echo -e "${YELLOW}Making MTU change permanent...${NC}"
-    
+
     # Netplan (Ubuntu 18.04+)
     if [[ -d /etc/netplan ]] && ls /etc/netplan/*.yaml >/dev/null 2>&1; then
         local netplan_file=$(ls /etc/netplan/*.yaml | head -n1)
@@ -189,10 +222,13 @@ configure_mtu() {
             else
                 sed -i "/$NETWORK_INTERFACE:/a\      mtu: $new_mtu" "$netplan_file"
             fi
-            netplan apply >/dev/null 2>&1 && echo -e "${GREEN}Netplan configuration updated${NC}"
+            netplan apply >/dev/null 2>&1 && echo -e "${GREEN}Netplan configuration updated${NC}" || {
+                echo -e "${RED}Failed to apply Netplan configuration${NC}"
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: Failed to apply Netplan configuration" >> "$LOG_FILE"
+            }
         fi
     fi
-    
+
     # Network interfaces (Debian)
     elif [[ -f /etc/network/interfaces ]]; then
         if grep -q "$NETWORK_INTERFACE" /etc/network/interfaces; then
@@ -203,57 +239,56 @@ configure_mtu() {
             fi
         fi
     fi
-    
+
     # NetworkManager
     elif command -v nmcli >/dev/null 2>&1; then
         local connection_name=$(nmcli -t -f DEVICE,NAME con show | grep "^$NETWORK_INTERFACE:" | cut -d: -f2 | head -n1)
         if [ -n "$connection_name" ]; then
-            nmcli connection modify "$connection_name" 802-3-ethernet.mtu $new_mtu 2>/dev/null
-            nmcli connection up "$connection_name" >/dev/null 2>&1
+            nmcli connection modify "$connection_name" 802-3-ethernet.mtu "$new_mtu" 2>/dev/null
+            nmcli connection up "$connection_name" >/dev/null 2>&1 || {
+                echo -e "${RED}Failed to apply NetworkManager configuration${NC}"
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: Failed to apply NetworkManager configuration" >> "$LOG_FILE"
+            }
         fi
     fi
-    
+
     CURRENT_MTU=$new_mtu
     save_config
     echo -e "${GREEN}MTU successfully set to $new_mtu and made permanent${NC}"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Success: MTU set to $new_mtu on $NETWORK_INTERFACE" >> "$LOG_FILE"
     return 0
 }
 
-# Update DNS Configuration - COMPLETELY FIXED
+# Update DNS Configuration
 update_dns() {
     echo -e "${YELLOW}Setting DNS servers: ${DNS_SERVERS[*]}${NC}"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Setting DNS servers: ${DNS_SERVERS[*]}" >> "$LOG_FILE"
     
     local dns_configured=false
     local connection_name=""
     
-    # Method 1: NetworkManager (modern systems)
+    # Method 1: NetworkManager
     if command -v nmcli >/dev/null 2>&1 && systemctl is-active NetworkManager >/dev/null 2>&1; then
         connection_name=$(nmcli -t -f DEVICE,NAME con show | grep "^$NETWORK_INTERFACE:" | cut -d: -f2 | head -n1)
         if [ -n "$connection_name" ]; then
             echo -e "${YELLOW}Configuring DNS via NetworkManager: $connection_name${NC}"
-            
-            # Set IPv4 DNS
             nmcli con mod "$connection_name" ipv4.dns "$(echo ${DNS_SERVERS[@]} | tr ' ' ',')"
             nmcli con mod "$connection_name" ipv4.ignore-auto-dns yes
             nmcli con mod "$connection_name" ipv4.may-fail no
-            
-            # Set IPv6 DNS
             nmcli con mod "$connection_name" ipv6.dns "$(echo ${DNS_SERVERS[@]} | tr ' ' ',')"
             nmcli con mod "$connection_name" ipv6.ignore-auto-dns yes
             nmcli con mod "$connection_name" ipv6.may-fail no
-            
-            # Apply changes
             nmcli con down "$connection_name" 2>/dev/null
             sleep 2
             nmcli con up "$connection_name" 2>/dev/null
-            
-            # Check if DNS was applied
             local nmcli_dns=$(nmcli -g ipv4.dns con show "$connection_name" 2>/dev/null)
             if [[ "$nmcli_dns" == *"${DNS_SERVERS[0]}"* ]]; then
                 dns_configured=true
                 echo -e "${GREEN}DNS set via NetworkManager${NC}"
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Success: DNS set via NetworkManager" >> "$LOG_FILE"
             else
                 echo -e "${RED}Failed to set DNS via NetworkManager${NC}"
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: Failed to set DNS via NetworkManager" >> "$LOG_FILE"
             fi
         fi
     fi
@@ -262,8 +297,6 @@ update_dns() {
     if command -v systemctl >/dev/null 2>&1 && [ "$dns_configured" = false ]; then
         if systemctl is-active systemd-resolved >/dev/null 2>&1; then
             echo -e "${YELLOW}Configuring DNS via systemd-resolved...${NC}"
-            
-            # Create resolved.conf
             cat > /etc/systemd/resolved.conf <<EOL
 [Resolve]
 DNS=${DNS_SERVERS[*]}
@@ -273,22 +306,19 @@ DNSSEC=allow-downgrade
 Cache=yes
 DNSStubListener=yes
 EOL
-            
-            # Set per-interface DNS
             for dns in "${DNS_SERVERS[@]}"; do
                 resolvectl dns "$NETWORK_INTERFACE" "$dns" 2>/dev/null || true
             done
-            
             systemctl restart systemd-resolved
             resolvectl flush-caches
-            
-            # Check if DNS was applied
             local resolved_dns=$(resolvectl status | grep "DNS Servers" | head -n1 | awk '{print $3}' 2>/dev/null)
             if [[ "$resolved_dns" == *"${DNS_SERVERS[0]}"* ]]; then
                 dns_configured=true
                 echo -e "${GREEN}DNS set via systemd-resolved${NC}"
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Success: DNS set via systemd-resolved" >> "$LOG_FILE"
             else
                 echo -e "${RED}Failed to set DNS via systemd-resolved${NC}"
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: Failed to set DNS via systemd-resolved" >> "$LOG_FILE"
             fi
         fi
     fi
@@ -296,32 +326,24 @@ EOL
     # Method 3: Traditional resolv.conf
     if [ "$dns_configured" = false ]; then
         echo -e "${YELLOW}Configuring DNS via /etc/resolv.conf...${NC}"
-        
-        # Remove immutable attribute if set
         chattr -i /etc/resolv.conf 2>/dev/null || true
-        
-        # Backup original
         cp /etc/resolv.conf /etc/resolv.conf.backup.$(date +%Y%m%d%H%M%S) 2>/dev/null || true
-        
-        # Create new resolv.conf
         cat > /etc/resolv.conf <<EOL
 # Generated by $SCRIPT_NAME
 $(for dns in "${DNS_SERVERS[@]}"; do echo "nameserver $dns"; done)
 options rotate timeout:2 attempts:3
 EOL
-        
-        # Make resolv.conf immutable
         chattr +i /etc/resolv.conf 2>/dev/null && \
         echo -e "${GREEN}resolv.conf made immutable${NC}" || \
         echo -e "${YELLOW}Warning: Could not make resolv.conf immutable${NC}"
-        
-        # Check if DNS was applied
         local resolv_dns=$(grep -E '^nameserver' /etc/resolv.conf | awk '{print $2}' | head -n1)
         if [[ "$resolv_dns" == "${DNS_SERVERS[0]}" ]]; then
             dns_configured=true
             echo -e "${GREEN}DNS set via resolv.conf${NC}"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Success: DNS set via resolv.conf" >> "$LOG_FILE"
         else
             echo -e "${RED}Failed to set DNS via resolv.conf${NC}"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: Failed to set DNS via resolv.conf" >> "$LOG_FILE"
         fi
     fi
     
@@ -332,34 +354,28 @@ EOL
 $(for dns in "${DNS_SERVERS[@]}"; do echo "nameserver $dns"; done)
 EOL
         resolvconf -u
-        
-        # Check if DNS was applied
         local resolvconf_dns=$(grep -E '^nameserver' /etc/resolv.conf | awk '{print $2}' | head -n1)
         if [[ "$resolvconf_dns" == "${DNS_SERVERS[0]}" ]]; then
             dns_configured=true
             echo -e "${GREEN}DNS set via resolvconf${NC}"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Success: DNS set via resolvconf" >> "$LOG_FILE"
         else
             echo -e "${RED}Failed to set DNS via resolvconf${NC}"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: Failed to set DNS via resolvconf" >> "$LOG_FILE"
         fi
     fi
     
     # Method 5: DHCP configuration
     if [ -f /etc/dhcp/dhclient.conf ]; then
         echo -e "${YELLOW}Configuring DHCP to prevent DNS overwrites...${NC}"
-        
-        # Remove existing supersede lines
         sed -i '/supersede domain-name-servers/d' /etc/dhcp/dhclient.conf
-        
-        # Add new supersede line
         echo "supersede domain-name-servers ${DNS_SERVERS[*]};" >> /etc/dhcp/dhclient.conf
-        
-        # Restart network interface to apply DHCP changes
         ifdown "$NETWORK_INTERFACE" 2>/dev/null && ifup "$NETWORK_INTERFACE" 2>/dev/null || \
         nmcli con down "$connection_name" 2>/dev/null && nmcli con up "$connection_name" 2>/dev/null || \
         ip link set "$NETWORK_INTERFACE" down && ip link set "$NETWORK_INTERFACE" up
     fi
     
-    # Method 6: Disable NetworkManager DNS management if we used another method
+    # Method 6: Disable NetworkManager DNS management
     if [ -d /etc/NetworkManager/conf.d ] && [ "$dns_configured" = true ]; then
         cat > /etc/NetworkManager/conf.d/90-dns-none.conf <<EOL
 [main]
@@ -375,60 +391,61 @@ EOL
     # Verify DNS configuration
     echo -e "${YELLOW}Verifying DNS configuration...${NC}"
     sleep 3
-    
-    # Get current DNS from resolv.conf
     local current_dns=$(grep -E '^nameserver' /etc/resolv.conf 2>/dev/null | awk '{print $2}' | tr '\n' ' ')
     echo -e "${GREEN}Current DNS in resolv.conf: $current_dns${NC}"
     
-    # Test DNS resolution
     if timeout 5 dig +short google.com @${DNS_SERVERS[0]} >/dev/null 2>&1; then
         echo -e "${GREEN}✓ DNS resolution test successful${NC}"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Success: DNS resolution test passed" >> "$LOG_FILE"
     else
         echo -e "${RED}✗ DNS resolution test failed${NC}"
         echo -e "${YELLOW}Trying alternative DNS server...${NC}"
         if timeout 5 dig +short google.com @${DNS_SERVERS[1]} >/dev/null 2>&1; then
             echo -e "${GREEN}✓ Alternative DNS server works${NC}"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Success: Alternative DNS server test passed" >> "$LOG_FILE"
         else
             echo -e "${RED}✗ All DNS servers failed${NC}"
             echo -e "${YELLOW}Attempting to fix DNS configuration...${NC}"
-            
-            # Try to fix DNS configuration
             chattr -i /etc/resolv.conf 2>/dev/null || true
             cat > /etc/resolv.conf <<EOL
-# Generated by $SCRIPT_NAME
+# Generatedpszerű
+
+System: # $SCRIPT_NAME
 $(for dns in "${DNS_SERVERS[@]}"; do echo "nameserver $dns"; done)
 options rotate timeout:2 attempts:3
 EOL
             chattr +i /etc/resolv.conf 2>/dev/null || true
-            
-            # Test again
             if timeout 5 dig +short google.com @${DNS_SERVERS[0]} >/dev/null 2>&1; then
                 echo -e "${GREEN}✓ DNS resolution test successful after fix${NC}"
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Success: DNS resolution fixed" >> "$LOG_FILE"
             else
                 echo -e "${RED}✗ DNS resolution still failing${NC}"
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: DNS resolution fix failed" >> "$LOG_FILE"
             fi
         fi
     fi
     
     if [ "$dns_configured" = true ]; then
         echo -e "${GREEN}DNS configuration completed successfully!${NC}"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Success impos DNS configuration completed" >> "$LOG_FILE"
     else
         echo -e "${RED}Failed to configure DNS properly!${NC}"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: Failed to configure DNS" >> "$LOG_FILE"
     fi
 }
 
 # Install BBR
 install_bbr() {
-    # Check kernel version
     local kernel_version=$(uname -r | cut -d. -f1-2)
     if (( $(echo "$kernel_version < 4.9" | bc -l) )); then
         echo -e "${RED}Kernel version $kernel_version does not support BBR! Minimum required: 4.9${NC}"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: Kernel version $kernel_version does not support BBR" >> "$LOG_FILE"
         return 1
     fi
     
     echo -e "${YELLOW}Installing and configuring BBR...${NC}"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Installing BBR" >> "$LOG_FILE"
     
-    # Apply BBR settings
     cat >> /etc/sysctl.conf <<EOL
 # BBR Optimization - Added by $SCRIPT_NAME
 net.core.default_qdisc=fq
@@ -445,25 +462,26 @@ net.ipv4.tcp_slow_start_after_idle=0
 net.ipv4.tcp_mtu_probing=1
 EOL
     
-    # Apply sysctl settings
     if sysctl -p >/dev/null 2>&1; then
         echo -e "${GREEN}Sysctl settings applied successfully${NC}"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Success: Sysctl settings applied" >> "$LOG_FILE"
     else
         echo -e "${RED}Failed to apply some sysctl settings${NC}"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: Failed to apply sysctl settings" >> "$LOG_FILE"
     fi
     
-    # Set optimized MTU and DNS
     configure_mtu 1420
     DNS_SERVERS=("1.1.1.1" "1.0.0.1")
     update_dns
     
-    # Verify BBR
     local current_cc=$(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | awk '{print $3}')
     if [[ "$current_cc" == "bbr" ]]; then
         echo -e "${GREEN}✓ BBR successfully installed and configured${NC}"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Success: BBR installed and configured" >> "$LOG_FILE"
         return 0
     else
         echo -e "${RED}✗ Failed to enable BBR! Current: $current_cc${NC}"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: Failed to enable BBR, current: $current_cc" >> "$LOG_FILE"
         return 1
     fi
 }
@@ -485,24 +503,30 @@ manage_firewall() {
             if command -v ufw >/dev/null 2>&1; then
                 ufw --force enable
                 echo -e "${GREEN}UFW firewall has been enabled${NC}"
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Success: UFW firewall enabled" >> "$LOG_FILE"
             elif command -v firewall-cmd >/dev/null 2>&1; then
                 systemctl start firewalld
                 systemctl enable firewalld
                 echo -e "${GREEN}Firewalld has been enabled${NC}"
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Success: Firewalld enabled" >> "$LOG_FILE"
             else
                 echo -e "${RED}No supported firewall detected!${NC}"
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: No supported firewall detected" >> "$LOG_FILE"
             fi
             ;;
         2)
             if command -v ufw >/dev/null 2>&1; then
                 ufw disable
                 echo -e "${GREEN}UFW firewall has been disabled${NC}"
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Success: UFW firewall disabled" >> "$LOG_FILE"
             elif command -v firewall-cmd >/dev/null 2>&1; then
                 systemctl stop firewalld
                 systemctl disable firewalld
                 echo -e "${GREEN}Firewalld has been disabled${NC}"
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Success: Firewalld disabled" >> "$LOG_FILE"
             else
                 echo -e "${RED}No supported firewall detected!${NC}"
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: No supported firewall detected" >> "$LOG_FILE"
             fi
             ;;
         3)
@@ -512,19 +536,24 @@ manage_firewall() {
             
             if [[ ! "$port" =~ ^[0-9]+$ || $port -lt 1 || $port -gt 65535 ]]; then
                 echo -e "${RED}Invalid port number!${NC}"
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: Invalid port number $port" >> "$LOG_FILE"
             elif [[ ! "$protocol" =~ ^(tcp|udp)$ ]]; then
                 echo -e "${RED}Invalid protocol!${NC}"
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: Invalid protocol $protocol" >> "$LOG_FILE"
             else
                 if command -v ufw >/dev/null 2>&1; then
                     ufw allow "$port/$protocol"
                     echo -e "${GREEN}Port $port/$protocol opened${NC}"
+                    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Success: Port $port/$protocol opened via ufw" >> "$LOG_FILE"
                 elif command -v firewall-cmd >/dev/null 2>&1; then
                     firewall-cmd --permanent --add-port="$port/$protocol"
                     firewall-cmd --reload
                     echo -e "${GREEN}Port $port/$protocol opened${NC}"
+                    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Success: Port $port/$protocol opened via firewalld" >> "$LOG_FILE"
                 else
                     iptables -A INPUT -p "$protocol" --dport "$port" -j ACCEPT
                     echo -e "${GREEN}Port $port/$protocol opened via iptables${NC}"
+                    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Success: Port $port/$protocol opened via iptables" >> "$LOG_FILE"
                 fi
             fi
             ;;
@@ -535,29 +564,37 @@ manage_firewall() {
             
             if [[ ! "$port" =~ ^[0-9]+$ || $port -lt 1 || $port -gt 65535 ]]; then
                 echo -e "${RED}Invalid port number!${NC}"
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: Invalid port number $port" >> "$LOG_FILE"
             elif [[ ! "$protocol" =~ ^(tcp|udp)$ ]]; then
                 echo -e "${RED}Invalid protocol!${NC}"
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: Invalid protocol $protocol" >> "$LOG_FILE"
             else
                 if command -v ufw >/dev/null 2>&1; then
                     ufw delete allow "$port/$protocol"
                     echo -e "${GREEN}Port $port/$protocol closed${NC}"
+                    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Success: Port $port/$protocol closed via ufw" >> "$LOG_FILE"
                 elif command -v firewall-cmd >/dev/null 2>&1; then
                     firewall-cmd --permanent --remove-port="$port/$protocol"
                     firewall-cmd --reload
                     echo -e "${GREEN}Port $port/$protocol closed${NC}"
+                    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Success: Port $port/$protocol closed via firewalld" >> "$LOG_FILE"
                 else
                     iptables -D INPUT -p "$protocol" --dport "$port" -j ACCEPT 2>/dev/null
                     echo -e "${GREEN}Port $port/$protocol closed via iptables${NC}"
+                    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Success: Port $port/$protocol closed via iptables" >> "$LOG_FILE"
                 fi
             fi
             ;;
         5)
             if command -v ufw >/dev/null 2>&1; then
                 ufw status verbose
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Info: Listed open ports via ufw" >> "$LOG_FILE"
             elif command -v firewall-cmd >/dev/null 2>&1; then
                 firewall-cmd --list-ports
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Info: Listed open ports via firewalld" >> "$LOG_FILE"
             else
                 iptables -L INPUT -n --line-numbers | grep ACCEPT
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Info: Listed open ports via iptables" >> "$LOG_FILE"
             fi
             ;;
         6)
@@ -565,6 +602,7 @@ manage_firewall() {
             ;;
         *)
             echo -e "${RED}Invalid option!${NC}"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: Invalid firewall management option $fw_choice" >> "$LOG_FILE"
             ;;
     esac
     
@@ -585,20 +623,22 @@ manage_icmp() {
         1)
             iptables -A INPUT -p icmp --icmp-type echo-request -j DROP
             echo -e "${GREEN}ICMP Ping blocked${NC}"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Success: ICMP Ping blocked" >> "$LOG_FILE"
             ;;
         2)
             iptables -D INPUT -p icmp --icmp-type echo-request -j DROP 2>/dev/null
             echo -e "${GREEN}ICMP Ping allowed${NC}"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Success: ICMP Ping allowed" >> "$LOG_FILE"
             ;;
         3)
             return
             ;;
         *)
             echo -e "${RED}Invalid option!${NC}"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: Invalid ICMP option $icmp_choice" >> "$LOG_FILE"
             ;;
     esac
     
-    # Save iptables rules
     if command -v iptables-save >/dev/null 2>&1; then
         iptables-save > /etc/iptables/rules.v4 2>/dev/null
     fi
@@ -623,6 +663,7 @@ manage_ipv6() {
             echo "net.ipv6.conf.all.disable_ipv6=1" >> /etc/sysctl.conf
             echo "net.ipv6.conf.default.disable_ipv6=1" >> /etc/sysctl.conf
             echo -e "${GREEN}IPv6 disabled${NC}"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Success: IPv6 disabled" >> "$LOG_FILE"
             ;;
         2)
             sysctl -w net.ipv6.conf.all.disable_ipv6=0 >/dev/null
@@ -630,12 +671,14 @@ manage_ipv6() {
             sed -i '/net.ipv6.conf.all.disable_ipv6/d' /etc/sysctl.conf
             sed -i '/net.ipv6.conf.default.disable_ipv6/d' /etc/sysctl.conf
             echo -e "${GREEN}IPv6 enabled${NC}"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Success: IPv6 enabled" >> "$LOG_FILE"
             ;;
         3)
             return
             ;;
         *)
             echo -e "${RED}Invalid option!${NC}"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: Invalid IPv6 option $ipv6_choice" >> "$LOG_FILE"
             ;;
     esac
     
@@ -659,8 +702,10 @@ manage_tunnel() {
             if [[ "$iran_ip" =~ ^[0-9./]+$ ]]; then
                 iptables -t nat -A POSTROUTING -d "$iran_ip" -j ACCEPT
                 echo -e "${GREEN}Route added for $iran_ip${NC}"
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Success: Route added for $iran_ip" >> "$LOG_FILE"
             else
                 echo -e "${RED}Invalid IP/CIDR!${NC}"
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: Invalid IP/CIDR $iran_ip" >> "$LOG_FILE"
             fi
             ;;
         2)
@@ -670,23 +715,26 @@ manage_tunnel() {
                 ip route add "$foreign_ip" via "$gateway_ip" 2>/dev/null && \
                 echo -e "${GREEN}Route added: $foreign_ip via $gateway_ip${NC}" || \
                 echo -e "${RED}Failed to add route!${NC}"
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Info: Route add attempt for $foreign_ip via $gateway_ip" >> "$LOG_FILE"
             else
                 echo -e "${RED}Invalid IP/CIDR or Gateway!${NC}"
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: Invalid IP/CIDR $foreign_ip or Gateway $gateway_ip" >> "$LOG_FILE"
             fi
             ;;
         3)
             iptables -t nat -F
             echo -e "${GREEN}IPTables rules reset${NC}"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Success: IPTables rules reset" >> "$LOG_FILE"
             ;;
         4)
             return
             ;;
         *)
             echo -e "${RED}Invalid option!${NC}"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: Invalid tunnel option $tunnel_choice" >> "$LOG_FILE"
             ;;
     esac
     
-    # Save rules
     if command -v iptables-save >/dev/null 2>&1; then
         iptables-save > /etc/iptables/rules.v4 2>/dev/null
     fi
@@ -695,19 +743,16 @@ manage_tunnel() {
     manage_tunnel
 }
 
-# Reset Network Settings - FIXED
+# Reset Network Settings
 reset_network() {
     echo -e "${YELLOW}Resetting network settings...${NC}"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Resetting network settings" >> "$LOG_FILE"
     
-    # Reset MTU
     ip link set dev "$NETWORK_INTERFACE" mtu 1500 2>/dev/null
     echo "1500" > "/sys/class/net/$NETWORK_INTERFACE/mtu" 2>/dev/null
     CURRENT_MTU=1500
     
-    # Reset DNS - Multiple methods
     local connection_name=""
-    
-    # NetworkManager
     if command -v nmcli >/dev/null 2>&1; then
         connection_name=$(nmcli -t -f DEVICE,NAME con show | grep "^$NETWORK_INTERFACE:" | cut -d: -f2 | head -n1)
         if [ -n "$connection_name" ]; then
@@ -720,9 +765,7 @@ reset_network() {
         fi
     fi
     
-    # systemd-resolved
     if systemctl is-active systemd-resolved >/dev/null 2>&1; then
-        # Reset resolved.conf to default
         cat > /etc/systemd/resolved.conf <<EOL
 [Resolve]
 #DNS=
@@ -736,7 +779,6 @@ EOL
         resolvectl flush-caches
     fi
     
-    # Traditional resolv.conf
     chattr -i /etc/resolv.conf 2>/dev/null || true
     cat > /etc/resolv.conf <<EOL
 # Generated by $SCRIPT_NAME
@@ -745,11 +787,9 @@ nameserver 1.0.0.1
 options rotate
 EOL
     
-    # Remove NetworkManager DNS override
     rm -f /etc/NetworkManager/conf.d/90-dns-none.conf 2>/dev/null
     systemctl restart NetworkManager 2>/dev/null || true
     
-    # Remove DHCP override
     if [ -f /etc/dhcp/dhclient.conf ]; then
         sed -i '/supersede domain-name-servers/d' /etc/dhcp/dhclient.conf
     fi
@@ -758,28 +798,26 @@ EOL
     save_config
     
     echo -e "${GREEN}Network settings reset to default!${NC}"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Success: Network settings reset" >> "$LOG_FILE"
 }
 
 # Reset ALL Changes
 reset_all() {
     echo -e "${YELLOW}Resetting ALL changes...${NC}"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Resetting all changes" >> "$LOG_FILE"
     
     reset_network
     
-    # Reset ICMP
     iptables -D INPUT -p icmp --icmp-type echo-request -j DROP 2>/dev/null
     
-    # Reset IPv6
     sysctl -w net.ipv6.conf.all.disable_ipv6=0 >/dev/null
     sysctl -w net.ipv6.conf.default.disable_ipv6=0 >/dev/null
     sed -i '/net.ipv6.conf.all.disable_ipv6/d' /etc/sysctl.conf
     sed -i '/net.ipv6.conf.default.disable_ipv6/d' /etc/sysctl.conf
     
-    # Reset IPTables
     iptables -t nat -F
     iptables -F
     
-    # Remove BBR settings
     sed -i '/# BBR Optimization/d' /etc/sysctl.conf
     sed -i '/net.core.default_qdisc=fq/d' /etc/sysctl.conf
     sed -i '/net.ipv4.tcp_congestion_control=bbr/d' /etc/sysctl.conf
@@ -791,21 +829,19 @@ reset_all() {
     sed -i '/net.ipv4.tcp_max_syn_backlog/d' /etc/sysctl.conf
     sed -i '/net.core.somaxconn/d' /etc/sysctl.conf
     sed -i '/net.core.netdev_max_backlog/d' /etc/sysctl.conf
-    sed -i '/net.ipv4.tcp_slow_start_after_idle/d' /etc/sysctl.conf
+    sed -i '/net.ipv4 tcp_slow_start_after_idle/d' /etc/sysctl.conf
     sed -i '/net.ipv4.tcp_mtu_probing/d' /etc/sysctl.conf
     
-    # Apply sysctl
     sysctl -p >/dev/null 2>&1
     
-    # Save iptables
     if command -v iptables-save >/dev/null 2>&1; then
         iptables-save > /etc/iptables/rules.v4 2>/dev/null
     fi
     
-    # Remove config file
     rm -f "$CONFIG_FILE" 2>/dev/null
     
     echo -e "${GREEN}All changes have been completely reset!${NC}"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Success: All changes reset" >> "$LOG_FILE"
 }
 
 # Reboot System
@@ -814,9 +850,11 @@ reboot_system() {
     read -p "Enter your choice: " reboot_choice
     if [[ "$reboot_choice" =~ ^[Yy]$ ]]; then
         echo -e "${GREEN}Rebooting system...${NC}"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] System reboot initiated" >> "$LOG_FILE"
         reboot
     else
         echo -e "${YELLOW}Reboot cancelled.${NC}"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Reboot cancelled" >> "$LOG_FILE"
     fi
 }
 
@@ -852,6 +890,7 @@ show_menu() {
                     configure_mtu "$new_mtu"
                 else
                     echo -e "${RED}Invalid MTU value!${NC}"
+                    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: Invalid MTU value $new_mtu" >> "$LOG_FILE"
                 fi
                 ;;
             3)
@@ -886,10 +925,12 @@ show_menu() {
                 ;;
             12)
                 echo -e "${GREEN}Exiting...${NC}"
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Script exited" >> "$LOG_FILE"
                 exit 0
                 ;;
             *)
                 echo -e "${RED}Invalid option!${NC}"
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: Invalid menu option $choice" >> "$LOG_FILE"
                 ;;
         esac
         
@@ -902,6 +943,7 @@ check_root
 check_dependencies
 if [ -z "$NETWORK_INTERFACE" ]; then
     echo -e "${RED}No default network interface detected! Please check your network configuration.${NC}"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: No default network interface detected" >> "$LOG_FILE"
     exit 1
 fi
 show_menu
