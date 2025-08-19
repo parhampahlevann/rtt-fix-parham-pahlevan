@@ -2,7 +2,7 @@
 
 # Global Configuration
 SCRIPT_NAME="Ultimate Network Optimizer PRO"
-SCRIPT_VERSION="10.2"  # Updated version
+SCRIPT_VERSION="10.4"  # Updated version
 AUTHOR="Parham Pahlevan"
 CONFIG_FILE="/etc/network_optimizer.conf"
 LOG_FILE="/var/log/network_optimizer.log"
@@ -306,46 +306,84 @@ install_bbr() {
         }
     fi
 
+    # Check if fq qdisc is supported
+    if ! tc qdisc show | grep -q fq; then
+        tc qdisc add dev "$NETWORK_INTERFACE" root fq 2>/dev/null || {
+            echo -e "${RED}Fair Queue (fq) qdisc is not supported!${NC}"
+            return 1
+        }
+        tc qdisc del dev "$NETWORK_INTERFACE" root fq 2>/dev/null
+    fi
+
     # Backup current sysctl settings
     cp /etc/sysctl.conf "$BACKUP_DIR/sysctl.conf.bak.$(date +%s)"
 
-    # Apply minimal BBR settings
-    cat >> /etc/sysctl.conf <<EOL
-# BBR Minimal Optimization
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
-EOL
+    # List of parameters to apply
+    local sysctl_params=(
+        "net.core.default_qdisc=fq"
+        "net.ipv4.tcp_congestion_control=bbr"
+        "net.ipv4.tcp_fastopen=3"
+        "net.ipv4.tcp_syncookies=1"
+        "net.ipv4.tcp_tw_reuse=1"
+        "net.ipv4.tcp_fin_timeout=30"
+        "net.ipv4.tcp_keepalive_time=1200"
+        "net.ipv4.ip_local_port_range=1024 65000"
+        "net.ipv4.tcp_max_syn_backlog=8192"
+        "net.ipv4.tcp_max_tw_buckets=5000"
+        "net.core.somaxconn=65535"
+        "net.core.netdev_max_backlog=16384"
+        "net.ipv4.tcp_slow_start_after_idle=0"
+        "net.ipv4.tcp_mtu_probing=1"
+        "net.ipv4.tcp_rfc1337=1"
+    )
 
-    # Apply settings temporarily
-    sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1
-    sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1
+    # Apply settings temporarily and validate
+    for param in "${sysctl_params[@]}"; do
+        if ! sysctl -w "$param" >/dev/null 2>&1; then
+            echo -e "${RED}Failed to set $param!${NC}"
+            cp "$BACKUP_DIR/sysctl.conf.bak.$(ls -t "$BACKUP_DIR/sysctl.conf.bak.*" | head -1)" /etc/sysctl.conf
+            sysctl -p >/dev/null 2>&1
+            /usr/local/bin/network_emergency_recovery
+            return 1
+        fi
+    done
 
-    # Test connectivity
+    # Test connectivity after temporary changes
     if ! _test_connectivity; then
-        echo -e "${RED}Connectivity lost after applying BBR! Restoring previous settings...${NC}"
+        echo -e "${RED}Connectivity lost after applying BBR settings! Restoring previous settings...${NC}"
         cp "$BACKUP_DIR/sysctl.conf.bak.$(ls -t "$BACKUP_DIR/sysctl.conf.bak.*" | head -1)" /etc/sysctl.conf
         sysctl -p >/dev/null 2>&1
         /usr/local/bin/network_emergency_recovery
         return 1
-    }
+    fi
 
     # Apply settings persistently
+    {
+        echo "# BBR Optimization"
+        for param in "${sysctl_params[@]}"; do
+            echo "$param"
+        done
+    } >> /etc/sysctl.conf
+
+    # Apply persistent settings
     if ! sysctl -p >/dev/null 2>&1; then
-        echo -e "${RED}Error applying BBR settings! Restoring backup...${NC}"
+        echo -e "${RED}Error applying BBR settings persistently! Restoring backup...${NC}"
         cp "$BACKUP_DIR/sysctl.conf.bak.$(ls -t "$BACKUP_DIR/sysctl.conf.bak.*" | head -1)" /etc/sysctl.conf
         sysctl -p >/dev/null 2>&1
+        /usr/local/bin/network_emergency_recovery
         return 1
     fi
 
     # Verify BBR
     local current_cc=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
     if [[ "$current_cc" == "bbr" ]]; then
-        echo -e "${GREEN}BBR successfully installed${NC}"
+        echo -e "${GREEN}BBR and TCP optimizations successfully installed${NC}"
         return 0
     else
         echo -e "${RED}Failed to enable BBR!${NC}"
         cp "$BACKUP_DIR/sysctl.conf.bak.$(ls -t "$BACKUP_DIR/sysctl.conf.bak.*" | head -1)" /etc/sysctl.conf
         sysctl -p >/dev/null 2>&1
+        /usr/local/bin/network_emergency_recovery
         return 1
     fi
 }
@@ -509,9 +547,7 @@ manage_ipv6() {
         3)
             return
             ;;
-        *)
-            echo -e "${RED}Invalid option!${NC}"
-            ;;
+ Ascending...
     esac
     
     read -p "Press [Enter] to continue..."
@@ -591,9 +627,8 @@ reset_all() {
     # Reset IPTables
     iptables -t nat -F
 
-    # Remove BBR
-    sed -i '/net.core.default_qdisc=fq/d' /etc/sysctl.conf
-    sed -i '/net.ipv4.tcp_congestion_control=bbr/d' /etc/sysctl.conf
+    # Remove BBR and TCP settings
+    sed -i '/# BBR Optimization/,/net.ipv4.tcp_rfc1337=1/d' /etc/sysctl.conf
     sysctl -p >/dev/null 2>&1
 
     # Remove config file
