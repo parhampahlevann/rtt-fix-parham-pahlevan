@@ -1,20 +1,22 @@
 #!/bin/bash
 
 # Global Configuration
-SCRIPT_NAME="Ultimate Network Optimizer"
-SCRIPT_VERSION="8.1"
+SCRIPT_NAME="Ultimate Network Optimizer PRO"
+SCRIPT_VERSION="10.0"
 AUTHOR="Parham Pahlevan"
 CONFIG_FILE="/etc/network_optimizer.conf"
 LOG_FILE="/var/log/network_optimizer.log"
-NETWORK_INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
+BACKUP_DIR="/var/lib/network_optimizer"
+NETWORK_INTERFACE=$(ip -o -4 route show default | awk '{print $5}' | head -n1)
 DEFAULT_MTU=1420
+[ -f /proc/xen/xenbus ] && DEFAULT_MTU=1450 # Hetzner adjustment
 CURRENT_MTU=$(cat /sys/class/net/$NETWORK_INTERFACE/mtu 2>/dev/null || echo $DEFAULT_MTU)
-DNS_SERVERS=("1.1.1.1" "8.8.8.8")
+DNS_SERVERS=("1.1.1.1" "8.8.8.8" "9.9.9.9") # Multiple fallbacks
 CURRENT_DNS=$(grep nameserver /etc/resolv.conf 2>/dev/null | awk '{print $2}' | tr '\n' ' ')
+SAFE_REBOOT=false
 
-# Initialize logging
-mkdir -p "$(dirname "$LOG_FILE")"
-touch "$LOG_FILE"
+# Initialize logging and backup
+mkdir -p "$BACKUP_DIR" "$(dirname "$LOG_FILE")"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 # Color Codes
@@ -33,13 +35,13 @@ NETWORK_INTERFACE="$NETWORK_INTERFACE"
 MTU=$CURRENT_MTU
 DNS_SERVERS=(${DNS_SERVERS[@]})
 EOL
+    chmod 600 "$CONFIG_FILE"
 }
 
 # Load Configuration
 load_config() {
     if [ -f "$CONFIG_FILE" ]; then
         source "$CONFIG_FILE"
-        # Apply loaded settings
         [ -n "$MTU" ] && CURRENT_MTU=$MTU
         [ -n "$DNS_SERVERS" ] && DNS_SERVERS=(${DNS_SERVERS[@]})
         [ -n "$NETWORK_INTERFACE" ] && NETWORK_INTERFACE="$NETWORK_INTERFACE"
@@ -52,36 +54,26 @@ apply_persistent_settings() {
     if [ -n "$CURRENT_MTU" ]; then
         ip link set dev "$NETWORK_INTERFACE" mtu "$CURRENT_MTU" 2>/dev/null
         
-        # Persistent MTU configuration
         if [[ -d /etc/netplan ]]; then
             local netplan_file=$(ls /etc/netplan/*.yaml | head -n1)
-            if [ -f "$netplan_file" ]; then
-                if ! grep -q "mtu: $CURRENT_MTU" "$netplan_file"; then
-                    sed -i "/$NETWORK_INTERFACE:/a\      mtu: $CURRENT_MTU" "$netplan_file"
-                    netplan apply >/dev/null 2>&1
-                fi
-            fi
+            [ -f "$netplan_file" ] && sed -i "/$NETWORK_INTERFACE:/a\      mtu: $CURRENT_MTU" "$netplan_file"
+            netplan apply >/dev/null 2>&1
         elif [[ -f /etc/network/interfaces ]]; then
-            if ! grep -q "mtu $CURRENT_MTU" /etc/network/interfaces; then
-                sed -i "/iface $NETWORK_INTERFACE/,/^$/ s/mtu .*/mtu $CURRENT_MTU/" /etc/network/interfaces
-                systemctl restart networking >/dev/null 2>&1
-            fi
+            sed -i "/iface $NETWORK_INTERFACE/,/^$/ s/mtu .*/mtu $CURRENT_MTU/" /etc/network/interfaces
+            systemctl restart networking >/dev/null 2>&1
         elif [[ -d /etc/sysconfig/network-scripts ]]; then
             local ifcfg_file="/etc/sysconfig/network-scripts/ifcfg-$NETWORK_INTERFACE"
-            if [ -f "$ifcfg_file" ]; then
-                if grep -q "MTU=" "$ifcfg_file"; then
-                    sed -i "s/MTU=.*/MTU=$CURRENT_MTU/" "$ifcfg_file"
-                else
-                    echo "MTU=$CURRENT_MTU" >> "$ifcfg_file"
-                fi
+            [ -f "$ifcfg_file" ] && {
+                grep -q "MTU=" "$ifcfg_file" && 
+                sed -i "s/MTU=.*/MTU=$CURRENT_MTU/" "$ifcfg_file" || 
+                echo "MTU=$CURRENT_MTU" >> "$ifcfg_file"
                 systemctl restart network >/dev/null 2>&1
-            fi
+            }
         fi
     fi
 
     # Apply DNS
     if [ ${#DNS_SERVERS[@]} -gt 0 ]; then
-        # Check for systemd-resolved
         if systemctl is-active --quiet systemd-resolved; then
             rm -f /etc/resolv.conf
             ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
@@ -162,10 +154,12 @@ check_root() {
 
 # Test Connectivity
 _test_connectivity() {
-    local target="8.8.8.8"
-    if ping -c 2 -W 3 "$target" >/dev/null 2>&1; then
-        return 0
-    fi
+    local targets=("8.8.8.8" "1.1.1.1" "google.com")
+    for target in "${targets[@]}"; do
+        if ping -c 2 -W 3 "$target" >/dev/null 2>&1; then
+            return 0
+        fi
+    done
     return 1
 }
 
@@ -190,13 +184,20 @@ configure_mtu() {
         return 1
     fi
 
+    # Backup current settings
+    local backup_file="$BACKUP_DIR/mtu_backup_$(date +%s).conf"
+    ip -o link show > "$backup_file"
+
     # Set temporary MTU
     if ! ip link set dev "$NETWORK_INTERFACE" mtu "$new_mtu"; then
         echo -e "${RED}Failed to set temporary MTU!${NC}"
         return 1
     fi
 
-    # Test connectivity
+    # Wait for interface to stabilize
+    sleep 3
+
+    # Test connectivity with multiple methods
     if ! _test_connectivity; then
         echo -e "${RED}Connectivity test failed! Rolling back MTU...${NC}"
         ip link set dev "$NETWORK_INTERFACE" mtu "$old_mtu"
@@ -206,15 +207,24 @@ configure_mtu() {
     # Apply permanent configuration
     if [[ -d /etc/netplan ]]; then
         local netplan_file=$(ls /etc/netplan/*.yaml | head -n1)
-        [ -f "$netplan_file" ] && sed -i "/$NETWORK_INTERFACE:/a\      mtu: $new_mtu" "$netplan_file"
-        netplan apply >/dev/null 2>&1
+        [ -f "$netplan_file" ] && {
+            grep -q "mtu: $new_mtu" "$netplan_file" || 
+            sed -i "/$NETWORK_INTERFACE:/a\      mtu: $new_mtu" "$netplan_file"
+            netplan apply >/dev/null 2>&1
+        }
     elif [[ -f /etc/network/interfaces ]]; then
-        sed -i "/iface $NETWORK_INTERFACE/,/^$/ s/mtu .*/mtu $new_mtu/" /etc/network/interfaces
-        systemctl restart networking >/dev/null 2>&1
+        grep -q "mtu $new_mtu" /etc/network/interfaces || {
+            sed -i "/iface $NETWORK_INTERFACE/,/^$/ s/mtu .*/mtu $new_mtu/" /etc/network/interfaces
+            systemctl restart networking >/dev/null 2>&1
+        }
     elif [[ -d /etc/sysconfig/network-scripts ]]; then
         local ifcfg_file="/etc/sysconfig/network-scripts/ifcfg-$NETWORK_INTERFACE"
-        grep -q "MTU=" "$ifcfg_file" && sed -i "s/MTU=.*/MTU=$new_mtu/" "$ifcfg_file" || echo "MTU=$new_mtu" >> "$ifcfg_file"
-        systemctl restart network >/dev/null 2>&1
+        [ -f "$ifcfg_file" ] && {
+            grep -q "MTU=" "$ifcfg_file" && 
+            sed -i "s/MTU=.*/MTU=$new_mtu/" "$ifcfg_file" || 
+            echo "MTU=$new_mtu" >> "$ifcfg_file"
+            systemctl restart network >/dev/null 2>&1
+        }
     fi
 
     CURRENT_MTU=$new_mtu
@@ -225,13 +235,22 @@ configure_mtu() {
 
 # Update DNS Configuration
 update_dns() {
-    # Validate DNS servers
+    # Test DNS servers before applying
+    local working_dns=()
     for dns in "${DNS_SERVERS[@]}"; do
-        if ! [[ "$dns" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo -e "${RED}Invalid DNS server: $dns${NC}"
-            return 1
+        if timeout 2 dig +short @$dns google.com >/dev/null; then
+            working_dns+=("$dns")
+        else
+            echo -e "${YELLOW}Warning: DNS server $dns is not responding${NC}"
         fi
     done
+
+    if [ ${#working_dns[@]} -eq 0 ]; then
+        echo -e "${RED}Error: No working DNS servers found! Using defaults.${NC}"
+        working_dns=("1.1.1.1" "8.8.8.8")
+    fi
+
+    DNS_SERVERS=("${working_dns[@]}")
 
     # Apply DNS settings
     if systemctl is-active --quiet systemd-resolved; then
@@ -256,12 +275,15 @@ update_dns() {
     echo -e "${GREEN}DNS servers updated successfully (persistent after reboot)${NC}"
 }
 
-# Install BBR
+# Enhanced BBR Installation
 install_bbr() {
-    # Apply BBR settings
+    # Backup current sysctl settings
+    cp /etc/sysctl.conf "$BACKUP_DIR/sysctl.conf.bak.$(date +%s)"
+
+    # Apply comprehensive BBR settings
     cat >> /etc/sysctl.conf <<EOL
 
-# BBR Optimization
+# BBR Advanced Optimization
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 net.ipv4.tcp_fastopen=3
@@ -274,20 +296,36 @@ net.core.somaxconn=65535
 net.core.netdev_max_backlog=16384
 net.ipv4.tcp_slow_start_after_idle=0
 net.ipv4.tcp_mtu_probing=1
+net.ipv4.tcp_keepalive_time=300
+net.ipv4.tcp_keepalive_probes=5
+net.ipv4.tcp_keepalive_intvl=15
+net.ipv4.tcp_rfc1337=1
+net.ipv4.tcp_timestamps=1
+net.ipv4.tcp_window_scaling=1
+net.ipv4.tcp_sack=1
+net.ipv4.tcp_dsack=1
+net.ipv4.tcp_fack=1
+net.ipv4.tcp_ecn=2
 EOL
 
     # Apply settings
-    sysctl -p >/dev/null 2>&1
-
-    # Set default MTU and DNS
-    configure_mtu 1420
-    DNS_SERVERS=("1.1.1.1" "8.8.8.8")
-    update_dns
+    if ! sysctl -p >/dev/null 2>&1; then
+        echo -e "${RED}Error applying BBR settings! Restoring backup...${NC}"
+        cp "$BACKUP_DIR/sysctl.conf.bak.$(ls -t "$BACKUP_DIR/sysctl.conf.bak.*" | head -1)" /etc/sysctl.conf
+        sysctl -p >/dev/null 2>&1
+        return 1
+    fi
 
     # Verify BBR
     local current_cc=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
     if [[ "$current_cc" == "bbr" ]]; then
-        echo -e "${GREEN}BBR successfully installed and configured (persistent after reboot)${NC}"
+        echo -e "${GREEN}BBR successfully installed with advanced parameters${NC}"
+        
+        # Set safe defaults for MTU and DNS
+        configure_mtu 1420
+        DNS_SERVERS=("1.1.1.1" "8.8.8.8" "9.9.9.9")
+        update_dns
+        
         return 0
     else
         echo -e "${RED}Failed to enable BBR!${NC}"
@@ -564,6 +602,7 @@ reset_all() {
     # Remove BBR
     sed -i '/net.core.default_qdisc=fq/d' /etc/sysctl.conf
     sed -i '/net.ipv4.tcp_congestion_control=bbr/d' /etc/sysctl.conf
+    sed -i '/BBR Advanced Optimization/,/net.ipv4.tcp_ecn=2/d' /etc/sysctl.conf
     sysctl -p >/dev/null 2>&1
 
     # Remove config file
@@ -585,6 +624,36 @@ reboot_system() {
     fi
 }
 
+# Create Emergency Recovery Service
+create_recovery_service() {
+    cat > /usr/local/bin/network_emergency_recovery <<EOL
+#!/bin/bash
+# Emergency network recovery
+ip link set dev $NETWORK_INTERFACE mtu 1500
+echo "nameserver 8.8.8.8" > /etc/resolv.conf
+echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+chattr -i /etc/resolv.conf 2>/dev/null
+iptables -F
+EOL
+
+    chmod +x /usr/local/bin/network_emergency_recovery
+
+    cat > /etc/systemd/system/network-recovery.service <<EOL
+[Unit]
+Description=Network Emergency Recovery
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/network_emergency_recovery
+Type=oneshot
+
+[Install]
+WantedBy=multi-user.target
+EOL
+
+    systemctl enable network-recovery.service >/dev/null 2>&1
+}
+
 # Main Menu
 show_menu() {
     load_config
@@ -593,9 +662,9 @@ show_menu() {
     while true; do
         show_header
         echo -e "${BOLD}Main Menu:${NC}"
-        echo -e "1) Install BBR Optimization"
-        echo -e "2) Configure MTU"
-        echo -e "3) Configure DNS"
+        echo -e "1) Install Advanced BBR Optimization"
+        echo -e "2) Configure MTU (Current: $CURRENT_MTU)"
+        echo -e "3) Configure DNS (Current: ${DNS_SERVERS[*]})"
         echo -e "4) Firewall Management"
         echo -e "5) Reset Network Settings"
         echo -e "6) Manage ICMP Ping"
@@ -604,17 +673,15 @@ show_menu() {
         echo -e "9) Ping MTU Size Test"
         echo -e "10) Reset ALL Changes"
         echo -e "11) Reboot System"
-        echo -e "12) Exit"
+        echo -e "12) Emergency Recovery Mode"
+        echo -e "13) Exit"
         
-        read -p "Enter your choice [1-12]: " choice
+        read -p "Enter your choice [1-13]: " choice
         
         case $choice in
-            1)
-                install_bbr
-                ;;
+            1) install_bbr ;;
             2)
-                echo -e "\nCurrent MTU: $CURRENT_MTU"
-                read -p "Enter new MTU value (recommended 1420): " new_mtu
+                read -p "Enter new MTU value (recommended 1420, Hetzner 1450): " new_mtu
                 if [[ "$new_mtu" =~ ^[0-9]+$ ]] && [ "$new_mtu" -ge 68 ] && [ "$new_mtu" -le 9000 ]; then
                     configure_mtu "$new_mtu"
                 else
@@ -622,36 +689,24 @@ show_menu() {
                 fi
                 ;;
             3)
-                echo -e "\nCurrent DNS: $CURRENT_DNS"
-                read -p "Enter new DNS servers (space separated, e.g., 1.1.1.1 8.8.8.8): " new_dns
+                read -p "Enter new DNS servers (space separated): " new_dns
                 DNS_SERVERS=($new_dns)
                 update_dns
                 ;;
-            4)
-                manage_firewall
-                ;;
-            5)
-                reset_network
-                ;;
-            6)
-                manage_icmp
-                ;;
-            7)
-                manage_ipv6
-                ;;
-            8)
-                manage_tunnel
-                ;;
-            9)
-                ping_mtu
-                ;;
-            10)
-                reset_all
-                ;;
-            11)
-                reboot_system
-                ;;
+            4) manage_firewall ;;
+            5) reset_network ;;
+            6) manage_icmp ;;
+            7) manage_ipv6 ;;
+            8) manage_tunnel ;;
+            9) ping_mtu ;;
+            10) reset_all ;;
+            11) reboot_system ;;
             12)
+                echo -e "\n${RED}EMERGENCY RECOVERY MODE${NC}"
+                /usr/local/bin/network_emergency_recovery
+                echo -e "${GREEN}Basic network settings restored!${NC}"
+                ;;
+            13)
                 echo -e "${GREEN}Exiting...${NC}"
                 exit 0
                 ;;
@@ -666,4 +721,5 @@ show_menu() {
 
 # Main Execution
 check_root
+create_recovery_service
 show_menu
