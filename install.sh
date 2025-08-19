@@ -2,7 +2,7 @@
 
 # Global Configuration
 SCRIPT_NAME="Ultimate Network Optimizer"
-SCRIPT_VERSION="8.0"
+SCRIPT_VERSION="8.1"
 AUTHOR="Parham Pahlevan"
 CONFIG_FILE="/etc/network_optimizer.conf"
 LOG_FILE="/var/log/network_optimizer.log"
@@ -13,8 +13,8 @@ DNS_SERVERS=("1.1.1.1" "8.8.8.8")
 CURRENT_DNS=$(grep nameserver /etc/resolv.conf 2>/dev/null | awk '{print $2}' | tr '\n' ' ')
 
 # Initialize logging
-mkdir -p "$(dirname "$LOG_FILE")"
-touch "$LOG_FILE"
+mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null
+touch "$LOG_FILE" 2>/dev/null
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 # Color Codes
@@ -37,8 +37,8 @@ EOL
 # Load Configuration
 load_config() {
     if [ -f "$CONFIG_FILE" ]; then
-        source "$CONFIG_FILE"
-        CURRENT_MTU=$MTU
+        source "$CONFIG_FILE" 2>/dev/null
+        CURRENT_MTU=${MTU:-$CURRENT_MTU}
         DNS_SERVERS=(${DNS_SERVERS[@]})
     fi
 }
@@ -54,7 +54,7 @@ show_header() {
     echo -e "${YELLOW}Current DNS: ${BOLD}$CURRENT_DNS${NC}"
 
     # Show BBR Status
-    local bbr_status=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
+    local bbr_status=$(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | awk '{print $3}')
     if [[ "$bbr_status" == "bbr" ]]; then
         echo -e "${YELLOW}BBR Status: ${GREEN}Enabled${NC}"
     else
@@ -63,7 +63,7 @@ show_header() {
 
     # Show Firewall Status
     if command -v ufw >/dev/null 2>&1; then
-        local fw_status=$(ufw status | grep -o "active")
+        local fw_status=$(ufw status | grep -o "active" 2>/dev/null || echo "inactive")
         echo -e "${YELLOW}Firewall Status: ${BOLD}$fw_status${NC}"
     elif command -v firewall-cmd >/dev/null 2>&1; then
         local fw_status=$(firewall-cmd --state 2>&1)
@@ -73,7 +73,7 @@ show_header() {
     fi
 
     # Show ICMP Status
-    local icmp_status=$(iptables -L INPUT -n | grep "icmp" | grep -o "DROP")
+    local icmp_status=$(iptables -L INPUT -n 2>/dev/null | grep "icmp" | grep -o "DROP")
     if [ "$icmp_status" == "DROP" ]; then
         echo -e "${YELLOW}ICMP Ping: ${RED}Blocked${NC}"
     else
@@ -81,7 +81,7 @@ show_header() {
     fi
 
     # Show IPv6 Status
-    local ipv6_status=$(sysctl net.ipv6.conf.all.disable_ipv6 | awk '{print $3}')
+    local ipv6_status=$(sysctl net.ipv6.conf.all.disable_ipv6 2>/dev/null | awk '{print $3}')
     if [ "$ipv6_status" == "1" ]; then
         echo -e "${YELLOW}IPv6: ${RED}Disabled${NC}"
     else
@@ -124,7 +124,7 @@ configure_mtu() {
     local old_mtu=$(cat /sys/class/net/$NETWORK_INTERFACE/mtu 2>/dev/null || echo $DEFAULT_MTU)
 
     # Set temporary MTU
-    if ! ip link set dev "$NETWORK_INTERFACE" mtu "$new_mtu"; then
+    if ! ip link set dev "$NETWORK_INTERFACE" mtu "$new_mtu" 2>/dev/null; then
         echo -e "${RED}Failed to set temporary MTU!${NC}"
         return 1
     fi
@@ -132,22 +132,55 @@ configure_mtu() {
     # Test connectivity
     if ! _test_connectivity; then
         echo -e "${RED}Connectivity test failed! Rolling back MTU...${NC}"
-        ip link set dev "$NETWORK_INTERFACE" mtu "$old_mtu"
+        ip link set dev "$NETWORK_INTERFACE" mtu "$old_mtu" 2>/dev/null
         return 1
     fi
 
     # Apply permanent configuration
     if [[ -d /etc/netplan ]]; then
-        local netplan_file=$(ls /etc/netplan/*.yaml | head -n1)
-        [ -f "$netplan_file" ] && sed -i "/$NETWORK_INTERFACE:/a\      mtu: $new_mtu" "$netplan_file"
-        netplan apply >/dev/null 2>&1
+        local netplan_file=$(ls /etc/netplan/*.yaml 2>/dev/null | head -n1)
+        if [ -f "$netplan_file" ]; then
+            # Backup original file
+            cp "$netplan_file" "$netplan_file.bak"
+            
+            # Remove existing MTU setting if any
+            sed -i "/mtu:/d" "$netplan_file"
+            
+            # Add new MTU setting
+            if grep -q "$NETWORK_INTERFACE:" "$netplan_file"; then
+                sed -i "/$NETWORK_INTERFACE:/a\      mtu: $new_mtu" "$netplan_file"
+            else
+                echo "Network configuration for $NETWORK_INTERFACE not found in netplan!"
+                return 1
+            fi
+            
+            netplan apply >/dev/null 2>&1
+        fi
     elif [[ -f /etc/network/interfaces ]]; then
-        sed -i "/iface $NETWORK_INTERFACE/,/^$/ s/mtu .*/mtu $new_mtu/" /etc/network/interfaces
-        systemctl restart networking >/dev/null 2>&1
+        # Backup original file
+        cp /etc/network/interfaces /etc/network/interfaces.bak
+        
+        # Remove existing MTU setting if any
+        sed -i "/mtu $NETWORK_INTERFACE/d" /etc/network/interfaces
+        
+        # Add new MTU setting
+        if grep -q "iface $NETWORK_INTERFACE" /etc/network/interfaces; then
+            sed -i "/iface $NETWORK_INTERFACE/a\    mtu $new_mtu" /etc/network/interfaces
+            systemctl restart networking >/dev/null 2>&1 || systemctl restart NetworkManager >/dev/null 2>&1
+        fi
     elif [[ -d /etc/sysconfig/network-scripts ]]; then
         local ifcfg_file="/etc/sysconfig/network-scripts/ifcfg-$NETWORK_INTERFACE"
-        grep -q "MTU=" "$ifcfg_file" && sed -i "s/MTU=.*/MTU=$new_mtu/" "$ifcfg_file" || echo "MTU=$new_mtu" >> "$ifcfg_file"
-        systemctl restart network >/dev/null 2>&1
+        if [ -f "$ifcfg_file" ]; then
+            # Backup original file
+            cp "$ifcfg_file" "$ifcfg_file.bak"
+            
+            # Remove existing MTU setting if any
+            sed -i "/MTU=/d" "$ifcfg_file"
+            
+            # Add new MTU setting
+            echo "MTU=$new_mtu" >> "$ifcfg_file"
+            systemctl restart network >/dev/null 2>&1
+        fi
     fi
 
     CURRENT_MTU=$new_mtu
@@ -160,6 +193,9 @@ configure_mtu() {
 update_dns() {
     # Make resolv.conf writable
     chattr -i /etc/resolv.conf 2>/dev/null
+    
+    # Backup original file
+    cp /etc/resolv.conf /etc/resolv.conf.bak 2>/dev/null
     
     # Create new resolv.conf
     echo "# Generated by $SCRIPT_NAME" > /etc/resolv.conf
@@ -177,6 +213,8 @@ update_dns() {
 
 # Install BBR
 install_bbr() {
+    echo -e "${YELLOW}Installing BBR optimization...${NC}"
+    
     # Apply BBR settings
     cat >> /etc/sysctl.conf <<EOL
 
@@ -204,14 +242,30 @@ EOL
     update_dns
 
     # Verify BBR
-    local current_cc=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
+    local current_cc=$(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | awk '{print $3}')
     if [[ "$current_cc" == "bbr" ]]; then
         echo -e "${GREEN}BBR successfully installed and configured${NC}"
         return 0
     else
         echo -e "${RED}Failed to enable BBR!${NC}"
+        echo -e "${YELLOW}Your kernel might not support BBR.${NC}"
         return 1
     fi
+}
+
+# Reset Network Settings
+reset_network() {
+    echo -e "${YELLOW}Resetting network settings...${NC}"
+    
+    # Reset MTU to default
+    configure_mtu 1500
+    
+    # Reset DNS to default
+    chattr -i /etc/resolv.conf 2>/dev/null
+    DNS_SERVERS=("8.8.8.8" "8.8.4.4")
+    update_dns
+    
+    echo -e "${GREEN}Network settings reset to default${NC}"
 }
 
 # Firewall Management
@@ -229,7 +283,7 @@ manage_firewall() {
     case $fw_choice in
         1)
             if command -v ufw >/dev/null 2>&1; then
-                ufw enable
+                ufw --force enable
                 echo -e "${GREEN}UFW firewall has been enabled${NC}"
             elif command -v firewall-cmd >/dev/null 2>&1; then
                 systemctl start firewalld
@@ -349,11 +403,15 @@ manage_ipv6() {
         1)
             sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null
             sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null
+            echo "net.ipv6.conf.all.disable_ipv6=1" >> /etc/sysctl.conf
+            echo "net.ipv6.conf.default.disable_ipv6=1" >> /etc/sysctl.conf
             echo -e "${GREEN}IPv6 has been DISABLED!${NC}"
             ;;
         2)
             sysctl -w net.ipv6.conf.all.disable_ipv6=0 >/dev/null
             sysctl -w net.ipv6.conf.default.disable_ipv6=0 >/dev/null
+            sed -i '/net.ipv6.conf.all.disable_ipv6=/d' /etc/sysctl.conf
+            sed -i '/net.ipv6.conf.default.disable_ipv6=/d' /etc/sysctl.conf
             echo -e "${GREEN}IPv6 has been ENABLED!${NC}"
             ;;
         3)
@@ -408,6 +466,8 @@ manage_tunnel() {
 
 # Reset ALL Changes
 reset_all() {
+    echo -e "${YELLOW}Resetting ALL changes...${NC}"
+    
     # Reset MTU
     ip link set dev "$NETWORK_INTERFACE" mtu 1500 2>/dev/null
     CURRENT_MTU=1500
@@ -424,13 +484,25 @@ reset_all() {
     # Reset IPv6
     sysctl -w net.ipv6.conf.all.disable_ipv6=0 >/dev/null
     sysctl -w net.ipv6.conf.default.disable_ipv6=0 >/dev/null
+    sed -i '/net.ipv6.conf.all.disable_ipv6=/d' /etc/sysctl.conf
+    sed -i '/net.ipv6.conf.default.disable_ipv6=/d' /etc/sysctl.conf
 
     # Reset IPTables
     iptables -t nat -F
 
-    # Remove BBR
+    # Remove BBR settings
     sed -i '/net.core.default_qdisc=fq/d' /etc/sysctl.conf
     sed -i '/net.ipv4.tcp_congestion_control=bbr/d' /etc/sysctl.conf
+    sed -i '/net.ipv4.tcp_fastopen=/d' /etc/sysctl.conf
+    sed -i '/net.ipv4.tcp_syncookies=/d' /etc/sysctl.conf
+    sed -i '/net.ipv4.tcp_tw_reuse=/d' /etc/sysctl.conf
+    sed -i '/net.ipv4.tcp_fin_timeout=/d' /etc/sysctl.conf
+    sed -i '/net.ipv4.ip_local_port_range=/d' /etc/sysctl.conf
+    sed -i '/net.ipv4.tcp_max_syn_backlog=/d' /etc/sysctl.conf
+    sed -i '/net.core.somaxconn=/d' /etc/sysctl.conf
+    sed -i '/net.core.netdev_max_backlog=/d' /etc/sysctl.conf
+    sed -i '/net.ipv4.tcp_slow_start_after_idle=/d' /etc/sysctl.conf
+    sed -i '/net.ipv4.tcp_mtu_probing=/d' /etc/sysctl.conf
     sysctl -p >/dev/null 2>&1
 
     # Remove config file
