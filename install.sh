@@ -1,589 +1,576 @@
 #!/bin/bash
 
 # Global Configuration
-SCRIPT_NAME="Ultimate Network Optimizer"
-SCRIPT_VERSION="8.1"
+SCRIPT_NAME="BBR VIP Optimizer Pro"
+SCRIPT_VERSION="4.0"
 AUTHOR="Parham Pahlevan"
-CONFIG_FILE="/etc/network_optimizer.conf"
-LOG_FILE="/var/log/network_optimizer.log"
+CONFIG_FILE="/etc/bbr_vip.conf"
+LOG_FILE="/var/log/bbr_vip.log"
+SYSCTL_BACKUP="/etc/sysctl.conf.bak"
+CRON_JOB_FILE="/etc/cron.d/bbr_vip_autoreset"
 NETWORK_INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
+VIP_MODE=false
+VIP_SUBNET=""
+VIP_GATEWAY=""
 DEFAULT_MTU=1420
 CURRENT_MTU=$(cat /sys/class/net/$NETWORK_INTERFACE/mtu 2>/dev/null || echo $DEFAULT_MTU)
-DNS_SERVERS=("1.1.1.1" "8.8.8.8")
+DNS_SERVERS=("1.1.1.1")
 CURRENT_DNS=$(grep nameserver /etc/resolv.conf 2>/dev/null | awk '{print $2}' | tr '\n' ' ')
+OS=""
+VER=""
 
 # Initialize logging
-mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null
-touch "$LOG_FILE" 2>/dev/null
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 # Color Codes
 RED='\033[0;31m'
+BOLD_RED='\033[1;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+PURPLE='\033[0;35m'
 NC='\033[0m'
 BOLD='\033[1m'
-
-# Save Configuration
-save_config() {
-    cat > "$CONFIG_FILE" <<EOL
-# Network Optimizer Configuration
-MTU=$CURRENT_MTU
-DNS_SERVERS=(${DNS_SERVERS[@]})
-EOL
-}
-
-# Load Configuration
-load_config() {
-    if [ -f "$CONFIG_FILE" ]; then
-        source "$CONFIG_FILE" 2>/dev/null
-        CURRENT_MTU=${MTU:-$CURRENT_MTU}
-        DNS_SERVERS=(${DNS_SERVERS[@]})
-    fi
-}
 
 # Header Display
 show_header() {
     clear
-    echo -e "${BLUE}${BOLD}╔════════════════════════════════════════════════╗"
-    echo -e "║   ${SCRIPT_NAME} ${SCRIPT_VERSION} - ${AUTHOR}         ║"
-    echo -e "╚════════════════════════════════════════════════╝${NC}"
-    echo -e "${YELLOW}Interface: ${BOLD}$NETWORK_INTERFACE${NC}"
+    echo -e "${BLUE}${BOLD}â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—"
+    echo -e "â•‘   ${SCRIPT_NAME} ${SCRIPT_VERSION} - ${AUTHOR}              â•‘"
+    echo -e "â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•${NC}"
+    echo -e "${YELLOW}Network Interface: ${BOLD}$NETWORK_INTERFACE${NC}"
+    echo -e "${YELLOW}VIP Mode: ${BOLD}$([ "$VIP_MODE" = true ] && echo "Enabled" || echo "Disabled")${NC}"
     echo -e "${YELLOW}Current MTU: ${BOLD}$CURRENT_MTU${NC}"
     echo -e "${YELLOW}Current DNS: ${BOLD}$CURRENT_DNS${NC}"
-
-    # Show BBR Status
-    local bbr_status=$(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | awk '{print $3}')
-    if [[ "$bbr_status" == "bbr" ]]; then
-        echo -e "${YELLOW}BBR Status: ${GREEN}Enabled${NC}"
-    else
-        echo -e "${YELLOW}BBR Status: ${RED}Disabled${NC}"
-    fi
-
-    # Show Firewall Status
-    if command -v ufw >/dev/null 2>&1; then
-        local fw_status=$(ufw status | grep -o "active" 2>/dev/null || echo "inactive")
-        echo -e "${YELLOW}Firewall Status: ${BOLD}$fw_status${NC}"
-    elif command -v firewall-cmd >/dev/null 2>&1; then
-        local fw_status=$(firewall-cmd --state 2>&1)
-        echo -e "${YELLOW}Firewall Status: ${BOLD}$fw_status${NC}"
-    else
-        echo -e "${YELLOW}Firewall Status: ${BOLD}Not detected${NC}"
-    fi
-
-    # Show ICMP Status
-    local icmp_status=$(iptables -L INPUT -n 2>/dev/null | grep "icmp" | grep -o "DROP")
-    if [ "$icmp_status" == "DROP" ]; then
-        echo -e "${YELLOW}ICMP Ping: ${RED}Blocked${NC}"
-    else
-        echo -e "${YELLOW}ICMP Ping: ${GREEN}Allowed${NC}"
-    fi
-
-    # Show IPv6 Status
-    local ipv6_status=$(sysctl net.ipv6.conf.all.disable_ipv6 2>/dev/null | awk '{print $3}')
-    if [ "$ipv6_status" == "1" ]; then
-        echo -e "${YELLOW}IPv6: ${RED}Disabled${NC}"
-    else
-        echo -e "${YELLOW}IPv6: ${GREEN}Enabled${NC}"
-    fi
-    echo
+    echo -e "${YELLOW}OS Detected: ${BOLD}$OS $VER${NC}\n"
 }
 
 # Check Root
 check_root() {
     if [[ $EUID -ne 0 ]]; then
-        echo -e "${RED}Error: This script must be run as root!${NC}"
+        echo -e "${BOLD_RED}Error: This script must be run as root!${NC}"
         exit 1
     fi
 }
 
-# Test Connectivity
-_test_connectivity() {
-    local target="8.8.8.8"
-    if ping -c 2 -W 3 "$target" >/dev/null 2>&1; then
-        return 0
-    fi
-    return 1
-}
-
-# Ping with Custom MTU
-ping_mtu() {
-    read -p "Enter MTU size to test (e.g., 1420): " test_mtu
-    if [[ "$test_mtu" =~ ^[0-9]+$ ]]; then
-        echo -e "${YELLOW}Testing ping with MTU=$test_mtu...${NC}"
-        ping -M do -s $((test_mtu - 28)) -c 4 8.8.8.8
+# Detect Distribution
+detect_distro() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS=$NAME
+        VER=$VERSION_ID
+    elif type lsb_release >/dev/null 2>&1; then
+        OS=$(lsb_release -si)
+        VER=$(lsb_release -sr)
+    elif [ -f /etc/lsb-release ]; then
+        . /etc/lsb-release
+        OS=$DISTRIB_ID
+        VER=$DISTRIB_RELEASE
+    elif [ -f /etc/debian_version ]; then
+        OS=Debian
+        VER=$(cat /etc/debian_version)
     else
-        echo -e "${RED}Invalid MTU value!${NC}"
+        OS=$(uname -s)
+        VER=$(uname -r)
     fi
 }
 
-# Universal MTU Configuration
-configure_mtu() {
-    local new_mtu=$1
-    local old_mtu=$(cat /sys/class/net/$NETWORK_INTERFACE/mtu 2>/dev/null || echo $DEFAULT_MTU)
-
-    # Set temporary MTU
-    if ! ip link set dev "$NETWORK_INTERFACE" mtu "$new_mtu" 2>/dev/null; then
-        echo -e "${RED}Failed to set temporary MTU!${NC}"
-        return 1
-    fi
-
-    # Test connectivity
-    if ! _test_connectivity; then
-        echo -e "${RED}Connectivity test failed! Rolling back MTU...${NC}"
-        ip link set dev "$NETWORK_INTERFACE" mtu "$old_mtu" 2>/dev/null
-        return 1
-    fi
-
-    # Apply permanent configuration
-    if [[ -d /etc/netplan ]]; then
-        local netplan_file=$(ls /etc/netplan/*.yaml 2>/dev/null | head -n1)
-        if [ -f "$netplan_file" ]; then
-            # Backup original file
-            cp "$netplan_file" "$netplan_file.bak"
-            
-            # Remove existing MTU setting if any
-            sed -i "/mtu:/d" "$netplan_file"
-            
-            # Add new MTU setting
-            if grep -q "$NETWORK_INTERFACE:" "$netplan_file"; then
-                sed -i "/$NETWORK_INTERFACE:/a\      mtu: $new_mtu" "$netplan_file"
-            else
-                echo "Network configuration for $NETWORK_INTERFACE not found in netplan!"
-                return 1
-            fi
-            
-            netplan apply >/dev/null 2>&1
-        fi
-    elif [[ -f /etc/network/interfaces ]]; then
-        # Backup original file
-        cp /etc/network/interfaces /etc/network/interfaces.bak
+# Load Configuration
+load_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        source "$CONFIG_FILE"
+    else
+        # Default values
+        ENABLE_BBR=true
+        ENABLE_FASTOPEN=true
+        TCP_CONGESTION="bbr"
+        TCP_FASTOPEN=3
+        VIP_MODE=false
+        VIP_SUBNET=""
+        VIP_GATEWAY=""
+        DEFAULT_KERNEL_PARAMS=(
+            "net.core.default_qdisc=fq"
+            "net.ipv4.tcp_congestion_control=$TCP_CONGESTION"
+            "net.ipv4.tcp_fastopen=$TCP_FASTOPEN"
+            "net.ipv4.tcp_syncookies=1"
+            "net.ipv4.tcp_tw_reuse=1"
+            "net.ipv4.tcp_fin_timeout=30"
+            "net.ipv4.tcp_keepalive_time=1200"
+            "net.ipv4.ip_local_port_range=1024 65000"
+            "net.ipv4.tcp_max_syn_backlog=8192"
+            "net.ipv4.tcp_max_tw_buckets=5000"
+            "net.core.somaxconn=65535"
+            "net.core.netdev_max_backlog=16384"
+            "net.ipv4.tcp_slow_start_after_idle=0"
+            "net.ipv4.tcp_mtu_probing=1"
+            "net.ipv4.tcp_rfc1337=1"
         
-        # Remove existing MTU setting if any
-        sed -i "/mtu $NETWORK_INTERFACE/d" /etc/network/interfaces
+        )
         
-        # Add new MTU setting
-        if grep -q "iface $NETWORK_INTERFACE" /etc/network/interfaces; then
-            sed -i "/iface $NETWORK_INTERFACE/a\    mtu $new_mtu" /etc/network/interfaces
-            systemctl restart networking >/dev/null 2>&1 || systemctl restart NetworkManager >/dev/null 2>&1
-        fi
-    elif [[ -d /etc/sysconfig/network-scripts ]]; then
-        local ifcfg_file="/etc/sysconfig/network-scripts/ifcfg-$NETWORK_INTERFACE"
-        if [ -f "$ifcfg_file" ]; then
-            # Backup original file
-            cp "$ifcfg_file" "$ifcfg_file.bak"
-            
-            # Remove existing MTU setting if any
-            sed -i "/MTU=/d" "$ifcfg_file"
-            
-            # Add new MTU setting
-            echo "MTU=$new_mtu" >> "$ifcfg_file"
-            systemctl restart network >/dev/null 2>&1
-        fi
+        # Apply default MTU
+        ifconfig $NETWORK_INTERFACE mtu $DEFAULT_MTU 2>/dev/null
+        CURRENT_MTU=$DEFAULT_MTU
+        
+        # Apply default DNS
+        update_dns
+        
+        save_config
     fi
-
-    CURRENT_MTU=$new_mtu
-    save_config
-    echo -e "${GREEN}MTU successfully set to $new_mtu${NC}"
-    return 0
 }
 
 # Update DNS Configuration
 update_dns() {
-    # Make resolv.conf writable
-    chattr -i /etc/resolv.conf 2>/dev/null
-    
-    # Backup original file
-    cp /etc/resolv.conf /etc/resolv.conf.bak 2>/dev/null
-    
-    # Create new resolv.conf
     echo "# Generated by $SCRIPT_NAME" > /etc/resolv.conf
-    for dns in "${DNS_SERVERS[@]}"; do
-        echo "nameserver $dns" >> /etc/resolv.conf
-    done
-    
-    # Make it immutable to prevent changes
-    chattr +i /etc/resolv.conf 2>/dev/null
-    
-    CURRENT_DNS="${DNS_SERVERS[*]}"
-    save_config
-    echo -e "${GREEN}DNS servers updated successfully${NC}"
+    echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+    CURRENT_DNS="1.1.1.1"
 }
 
-# Install BBR
-install_bbr() {
-    echo -e "${YELLOW}Installing BBR optimization...${NC}"
+# Backup current sysctl settings
+backup_sysctl() {
+    if [[ ! -f "$SYSCTL_BACKUP" ]]; then
+        cp /etc/sysctl.conf "$SYSCTL_BACKUP"
+        echo -e "${GREEN}Current sysctl configuration backed up to $SYSCTL_BACKUP${NC}"
+    fi
+}
+
+# Apply Kernel Parameters
+apply_kernel_params() {
+    echo -e "${YELLOW}Applying optimized kernel parameters...${NC}"
     
-    # Apply BBR settings
-    cat >> /etc/sysctl.conf <<EOL
+    # Create temp file
+    local temp_file=$(mktemp)
+    
+    # Process existing sysctl.conf
+    while IFS= read -r line; do
+        # Skip existing parameters we want to replace
+        local skip_line=false
+        for param in "${DEFAULT_KERNEL_PARAMS[@]}" "${VIP_KERNEL_PARAMS[@]}"; do
+            key=$(echo "$param" | cut -d= -f1)
+            if [[ "$line" == "$key"* ]]; then
+                skip_line=true
+                break
+            fi
+        done
+        $skip_line || echo "$line" >> "$temp_file"
+    done < /etc/sysctl.conf
+    
+    # Add new parameters
+    {
+        echo -e "\n# Added by $SCRIPT_NAME"
+        # Default parameters
+        for param in "${DEFAULT_KERNEL_PARAMS[@]}"; do
+            echo "$param"
+        done
+        
+        # VIP parameters if enabled
+        if [ "$VIP_MODE" = true ]; then
+            echo -e "\n# VIP Optimization Parameters"
+            for param in "${VIP_KERNEL_PARAMS[@]}"; do
+                echo "$param"
+            done
+        fi
+    } >> "$temp_file"
+    
+    # Replace sysctl.conf
+    mv "$temp_file" /etc/sysctl.conf
+    
+    # Apply changes
+    if ! sysctl -p >/dev/null 2>&1; then
+        echo -e "${BOLD_RED}Error applying sysctl settings!${NC}"
+        return 1
+    fi
+    
+    echo -e "${GREEN}Kernel parameters applied successfully!${NC}"
+    return 0
+}
 
-# BBR Optimization
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
-net.ipv4.tcp_fastopen=3
-net.ipv4.tcp_syncookies=1
-net.ipv4.tcp_tw_reuse=1
-net.ipv4.tcp_fin_timeout=30
-net.ipv4.ip_local_port_range=1024 65000
-net.ipv4.tcp_max_syn_backlog=8192
-net.core.somaxconn=65535
-net.core.netdev_max_backlog=16384
-net.ipv4.tcp_slow_start_after_idle=0
-net.ipv4.tcp_mtu_probing=1
-EOL
-
-    # Apply settings
-    sysctl -p >/dev/null 2>&1
-
-    # Set default MTU and DNS
-    configure_mtu 1420
-    DNS_SERVERS=("1.1.1.1" "8.8.8.8")
-    update_dns
-
-    # Verify BBR
-    local current_cc=$(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | awk '{print $3}')
-    if [[ "$current_cc" == "bbr" ]]; then
-        echo -e "${GREEN}BBR successfully installed and configured${NC}"
+# Verify BBR Status
+verify_bbr() {
+    echo -e "${YELLOW}Verifying BBR status...${NC}"
+    
+    local current_congestion=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}' 2>/dev/null)
+    local current_qdisc=$(sysctl net.core.default_qdisc | awk '{print $3}' 2>/dev/null)
+    
+    if [[ -z "$current_congestion" || -z "$current_qdisc" ]]; then
+        echo -e "${BOLD_RED}Error: Could not read current network settings!${NC}"
+        return 1
+    fi
+    
+    if [[ "$current_congestion" == "$TCP_CONGESTION" && "$current_qdisc" == "fq" ]]; then
+        echo -e "${GREEN}BBR is active and properly configured!${NC}"
+        echo -e "Congestion control: ${BOLD}$current_congestion${NC}"
+        echo -e "Queue discipline: ${BOLD}$current_qdisc${NC}"
         return 0
     else
-        echo -e "${RED}Failed to enable BBR!${NC}"
-        echo -e "${YELLOW}Your kernel might not support BBR.${NC}"
+        echo -e "${BOLD_RED}BBR is not properly configured!${NC}"
+        echo -e "Current congestion control: ${BOLD}$current_congestion${NC}"
+        echo -e "Current queue discipline: ${BOLD}$current_qdisc${NC}"
         return 1
     fi
 }
 
+# Setup Cron Job for Auto Reset
+setup_cron_job() {
+    local cron_time="0 4 * * *"  # Default: 4 AM daily
+    local script_path=$(readlink -f "$0")
+    
+    echo -e "${YELLOW}Setting up cron job for auto-reset...${NC}"
+    echo -e "${CYAN}Current cron time: $cron_time${NC}"
+    
+    read -p "Do you want to change the schedule? (y/n): " change_schedule
+    if [[ "$change_schedule" =~ ^[Yy] ]]; then
+        echo -e "\n${YELLOW}Cron schedule format:${NC}"
+        echo -e "Minute Hour Day Month DayOfWeek"
+        echo -e "Example: 0 4 * * * (runs daily at 4 AM)"
+        read -p "Enter new cron schedule: " cron_time
+    fi
+    
+    echo "$cron_time root $script_path --reset > /dev/null 2>&1" > "$CRON_JOB_FILE"
+    chmod 644 "$CRON_JOB_FILE"
+    
+    if [[ $? -ne 0 ]]; then
+        echo -e "${BOLD_RED}Error creating cron job!${NC}"
+        return 1
+    fi
+    
+    echo -e "${GREEN}Cron job installed at $CRON_JOB_FILE${NC}"
+    echo -e "The system will automatically reset network settings at: ${BOLD}$cron_time${NC}"
+    return 0
+}
+
 # Reset Network Settings
 reset_network() {
-    echo -e "${YELLOW}Resetting network settings...${NC}"
+    echo -e "${YELLOW}Resetting network settings to default...${NC}"
     
-    # Reset MTU to default
-    configure_mtu 1500
-    
-    # Reset DNS to default
-    chattr -i /etc/resolv.conf 2>/dev/null
-    DNS_SERVERS=("8.8.8.8" "8.8.4.4")
-    update_dns
-    
-    echo -e "${GREEN}Network settings reset to default${NC}"
+    if [[ -f "$SYSCTL_BACKUP" ]]; then
+        if ! cp "$SYSCTL_BACKUP" /etc/sysctl.conf; then
+            echo -e "${BOLD_RED}Error restoring backup!${NC}"
+            return 1
+        fi
+        
+        if ! sysctl -p >/dev/null 2>&1; then
+            echo -e "${BOLD_RED}Error applying restored settings!${NC}"
+            return 1
+        fi
+        
+        # Reset MTU to default
+        ifconfig $NETWORK_INTERFACE mtu $DEFAULT_MTU 2>/dev/null
+        CURRENT_MTU=$DEFAULT_MTU
+        
+        # Reset DNS to default
+        update_dns
+        
+        echo -e "${GREEN}Network settings restored from backup!${NC}"
+        
+        # Restart network service
+        restart_network_services
+        
+        return 0
+    else
+        echo -e "${BOLD_RED}No backup found! Cannot reset network settings.${NC}"
+        return 1
+    fi
 }
 
-# Firewall Management
-manage_firewall() {
-    echo -e "\n${YELLOW}Firewall Management${NC}"
-    echo -e "1) Enable Firewall"
-    echo -e "2) Disable Firewall"
-    echo -e "3) Open Port"
-    echo -e "4) Close Port"
-    echo -e "5) List Open Ports"
-    echo -e "6) Back to Main Menu"
+# Restart Network Services
+restart_network_services() {
+    echo -e "${YELLOW}Restarting network services...${NC}"
     
-    read -p "Enter your choice [1-6]: " fw_choice
-    
-    case $fw_choice in
-        1)
-            if command -v ufw >/dev/null 2>&1; then
-                ufw --force enable
-                echo -e "${GREEN}UFW firewall has been enabled${NC}"
-            elif command -v firewall-cmd >/dev/null 2>&1; then
-                systemctl start firewalld
-                systemctl enable firewalld
-                echo -e "${GREEN}Firewalld has been enabled${NC}"
-            else
-                echo -e "${RED}No supported firewall detected!${NC}"
-            fi
+    case $OS in
+        *Ubuntu*|*Debian*)
+            systemctl restart networking 2>/dev/null || service networking restart 2>/dev/null
             ;;
-        2)
-            if command -v ufw >/dev/null 2>&1; then
-                ufw disable
-                echo -e "${GREEN}UFW firewall has been disabled${NC}"
-            elif command -v firewall-cmd >/dev/null 2>&1; then
-                systemctl stop firewalld
-                systemctl disable firewalld
-                echo -e "${GREEN}Firewalld has been disabled${NC}"
-            else
-                echo -e "${RED}No supported firewall detected!${NC}"
-            fi
+        *CentOS*|*Red*Hat*|*Fedora*)
+            systemctl restart network 2>/dev/null || service network restart 2>/dev/null
             ;;
-        3)
-            read -p "Enter port number to open (e.g., 22): " port
-            read -p "Enter protocol (tcp/udp, default is tcp): " protocol
-            protocol=${protocol:-tcp}
-            
-            if command -v ufw >/dev/null 2>&1; then
-                ufw allow $port/$protocol
-                echo -e "${GREEN}Port $port/$protocol has been opened in UFW${NC}"
-            elif command -v firewall-cmd >/dev/null 2>&1; then
-                firewall-cmd --permanent --add-port=$port/$protocol
-                firewall-cmd --reload
-                echo -e "${GREEN}Port $port/$protocol has been opened in firewalld${NC}"
-            else
-                echo -e "${RED}No supported firewall detected!${NC}"
-            fi
-            ;;
-        4)
-            read -p "Enter port number to close (e.g., 22): " port
-            read -p "Enter protocol (tcp/udp, default is tcp): " protocol
-            protocol=${protocol:-tcp}
-            
-            if command -v ufw >/dev/null 2>&1; then
-                ufw deny $port/$protocol
-                echo -e "${GREEN}Port $port/$protocol has been closed in UFW${NC}"
-            elif command -v firewall-cmd >/dev/null 2>&1; then
-                firewall-cmd --permanent --remove-port=$port/$protocol
-                firewall-cmd --reload
-                echo -e "${GREEN}Port $port/$protocol has been closed in firewalld${NC}"
-            else
-                echo -e "${RED}No supported firewall detected!${NC}"
-            fi
-            ;;
-        5)
-            if command -v ufw >/dev/null 2>&1; then
-                echo -e "\n${YELLOW}UFW Open Ports:${NC}"
-                ufw status verbose
-            elif command -v firewall-cmd >/dev/null 2>&1; then
-                echo -e "\n${YELLOW}Firewalld Open Ports:${NC}"
-                firewall-cmd --list-ports
-            else
-                echo -e "${RED}No supported firewall detected!${NC}"
-            fi
-            ;;
-        6)
-            return
+        *Arch*)
+            systemctl restart systemd-networkd 2>/dev/null
             ;;
         *)
-            echo -e "${RED}Invalid option!${NC}"
+            echo -e "${YELLOW}Unknown OS! Please restart network manually.${NC}"
+            return 1
             ;;
     esac
     
-    read -p "Press [Enter] to continue..."
-    manage_firewall
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}Network services restarted successfully.${NC}"
+    else
+        echo -e "${BOLD_RED}Could not restart network services. You may need to reboot.${NC}"
+        return 1
+    fi
 }
 
-# ICMP Ping Management
-manage_icmp() {
-    echo -e "\n${YELLOW}ICMP Ping Management${NC}"
-    echo -e "1) Block ICMP Ping (Disable Ping)"
-    echo -e "2) Allow ICMP Ping (Enable Ping)"
-    echo -e "3) Back to Main Menu"
+# Configure VIP Settings
+configure_vip() {
+    echo -e "\n${YELLOW}Configuring VIP Optimization${NC}"
     
-    read -p "Enter your choice [1-3]: " icmp_choice
+    read -p "Enable VIP Mode? (y/n): " choice
+    if [[ "$choice" =~ ^[Yy] ]]; then
+        VIP_MODE=true
+        
+        read -p "Enter VIP Subnet (e.g., 10.0.0.0/24): " VIP_SUBNET
+        read -p "Enter VIP Gateway (e.g., 10.0.0.1): " VIP_GATEWAY
+        
+        echo -e "${GREEN}VIP Mode enabled with Subnet: $VIP_SUBNET, Gateway: $VIP_GATEWAY${NC}"
+    else
+        VIP_MODE=false
+        VIP_SUBNET=""
+        VIP_GATEWAY=""
+        echo -e "${YELLOW}VIP Mode disabled${NC}"
+    fi
     
-    case $icmp_choice in
-        1)
-            iptables -A INPUT -p icmp --icmp-type echo-request -j DROP
-            echo -e "${GREEN}ICMP Ping is now BLOCKED! (No one can ping this server)${NC}"
-            ;;
-        2)
-            iptables -D INPUT -p icmp --icmp-type echo-request -j DROP 2>/dev/null
-            echo -e "${GREEN}ICMP Ping is now ALLOWED! (Server is reachable via ping)${NC}"
-            ;;
-        3)
-            return
-            ;;
-        *)
-            echo -e "${RED}Invalid option!${NC}"
-            ;;
-    esac
-    
-    read -p "Press [Enter] to continue..."
-    manage_icmp
+    save_config
 }
 
-# IPv6 Management
-manage_ipv6() {
-    echo -e "\n${YELLOW}IPv6 Management${NC}"
-    echo -e "1) Disable IPv6"
-    echo -e "2) Enable IPv6"
-    echo -e "3) Back to Main Menu"
+# Configure MTU
+configure_mtu() {
+    echo -e "\n${YELLOW}Configuring Network Interface MTU${NC}"
     
-    read -p "Enter your choice [1-3]: " ipv6_choice
+    echo -e "Current MTU: ${BOLD}$CURRENT_MTU${NC}"
+    read -p "Do you want to change MTU? (y/n): " change_mtu
     
-    case $ipv6_choice in
-        1)
-            sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null
-            sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null
-            echo "net.ipv6.conf.all.disable_ipv6=1" >> /etc/sysctl.conf
-            echo "net.ipv6.conf.default.disable_ipv6=1" >> /etc/sysctl.conf
-            echo -e "${GREEN}IPv6 has been DISABLED!${NC}"
-            ;;
-        2)
-            sysctl -w net.ipv6.conf.all.disable_ipv6=0 >/dev/null
-            sysctl -w net.ipv6.conf.default.disable_ipv6=0 >/dev/null
-            sed -i '/net.ipv6.conf.all.disable_ipv6=/d' /etc/sysctl.conf
-            sed -i '/net.ipv6.conf.default.disable_ipv6=/d' /etc/sysctl.conf
-            echo -e "${GREEN}IPv6 has been ENABLED!${NC}"
-            ;;
-        3)
-            return
-            ;;
-        *)
-            echo -e "${RED}Invalid option!${NC}"
-            ;;
-    esac
-    
-    read -p "Press [Enter] to continue..."
-    manage_ipv6
+    if [[ "$change_mtu" =~ ^[Yy] ]]; then
+        read -p "Enter new MTU value (recommended: 1420): " new_mtu
+        
+        if ! [[ "$new_mtu" =~ ^[0-9]+$ ]]; then
+            echo -e "${BOLD_RED}Error: MTU must be a number!${NC}"
+            return 1
+        fi
+        
+        if ! ifconfig $NETWORK_INTERFACE mtu $new_mtu 2>/dev/null; then
+            echo -e "${BOLD_RED}Error setting MTU!${NC}"
+            return 1
+        fi
+        
+        CURRENT_MTU=$new_mtu
+        echo -e "${GREEN}MTU successfully changed to $new_mtu!${NC}"
+        
+        save_config
+    fi
 }
 
-# IPTable Tunnel Setup
-manage_tunnel() {
-    echo -e "\n${YELLOW}IPTable Tunnel Setup${NC}"
-    echo -e "1) Route Iranian IPs directly"
-    echo -e "2) Route Foreign IPs via VPN/Gateway"
-    echo -e "3) Reset IPTable Rules"
-    echo -e "4) Back to Main Menu"
+# Configure DNS
+configure_dns() {
+    echo -e "\n${YELLOW}Configuring DNS Servers${NC}"
     
-    read -p "Enter your choice [1-4]: " tunnel_choice
+    echo -e "Current DNS: ${BOLD}$CURRENT_DNS${NC}"
+    read -p "Do you want to change DNS servers? (y/n): " change_dns
     
-    case $tunnel_choice in
-        1)
-            read -p "Enter Iran IP/CIDR (e.g., 192.168.1.0/24 or 1.1.1.1): " iran_ip
-            iptables -t nat -A POSTROUTING -d "$iran_ip" -j ACCEPT
-            echo -e "${GREEN}Iran IP ($iran_ip) is now routed directly!${NC}"
-            ;;
-        2)
-            read -p "Enter Foreign IP/CIDR (e.g., 8.8.8.8/32): " foreign_ip
-            read -p "Enter Gateway/VPN IP (e.g., 10.8.0.1): " gateway_ip
-            ip route add "$foreign_ip" via "$gateway_ip"
-            echo -e "${GREEN}Foreign IP ($foreign_ip) is now routed via $gateway_ip!${NC}"
-            ;;
-        3)
-            iptables -t nat -F
-            echo -e "${GREEN}IPTable rules have been reset!${NC}"
-            ;;
-        4)
-            return
-            ;;
-        *)
-            echo -e "${RED}Invalid option!${NC}"
-            ;;
-    esac
-    
-    read -p "Press [Enter] to continue..."
-    manage_tunnel
+    if [[ "$change_dns" =~ ^[Yy] ]]; then
+        echo -e "\n${YELLOW}Enter DNS servers (space separated, max 3)${NC}"
+        echo -e "Example: 1.1.1.1 "
+        read -p "New DNS servers: " new_dns
+        
+        # Validate IP addresses
+        local valid_dns=()
+        for dns in $new_dns; do
+            if [[ "$dns" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                valid_dns+=("$dns")
+            else
+                echo -e "${BOLD_RED}Error: $dns is not a valid IP address!${NC}"
+                return 1
+            fi
+        done
+        
+        if [ ${#valid_dns[@]} -eq 0 ]; then
+            echo -e "${BOLD_RED}Error: No valid DNS servers provided!${NC}"
+            return 1
+        fi
+        
+        DNS_SERVERS=("${valid_dns[@]}")
+        update_dns
+        
+        echo -e "${GREEN}DNS servers updated successfully!${NC}"
+        echo -e "New DNS: ${BOLD}${DNS_SERVERS[@]}${NC}"
+        
+        save_config
+    fi
 }
 
-# Reset ALL Changes
-reset_all() {
-    echo -e "${YELLOW}Resetting ALL changes...${NC}"
+# Save Configuration
+save_config() {
+    echo -e "${YELLOW}Saving configuration to $CONFIG_FILE...${NC}"
     
-    # Reset MTU
-    ip link set dev "$NETWORK_INTERFACE" mtu 1500 2>/dev/null
-    CURRENT_MTU=1500
+    cat > "$CONFIG_FILE" <<EOL
+# BBR VIP Optimizer Configuration
+ENABLE_BBR=$ENABLE_BBR
+ENABLE_FASTOPEN=$ENABLE_FASTOPEN
+TCP_CONGESTION="$TCP_CONGESTION"
+TCP_FASTOPEN=$TCP_FASTOPEN
+VIP_MODE=$VIP_MODE
+VIP_SUBNET="$VIP_SUBNET"
+VIP_GATEWAY="$VIP_GATEWAY"
+MTU=$CURRENT_MTU
+DNS_SERVERS=(${DNS_SERVERS[@]})
+EOL
 
-    # Reset DNS
-    chattr -i /etc/resolv.conf 2>/dev/null
-    echo "nameserver 8.8.8.8" > /etc/resolv.conf
-    echo "nameserver 8.8.4.4" >> /etc/resolv.conf
-    CURRENT_DNS="8.8.8.8 8.8.4.4"
+    echo -e "${GREEN}Configuration saved successfully!${NC}"
+}
 
-    # Reset ICMP
-    iptables -D INPUT -p icmp --icmp-type echo-request -j DROP 2>/dev/null
+# Test Network Speed
+test_speed() {
+    echo -e "\n${YELLOW}Running network speed test...${NC}"
+    
+    if ! command -v speedtest-cli &> /dev/null; then
+        echo -e "${YELLOW}Installing speedtest-cli...${NC}"
+        if pip install speedtest-cli 2>/dev/null || apt-get install -y speedtest-cli 2>/dev/null || \
+           yum install -y speedtest-cli 2>/dev/null || dnf install -y speedtest-cli 2>/dev/null; then
+            echo -e "${GREEN}speedtest-cli installed successfully!${NC}"
+        else
+            echo -e "${BOLD_RED}Could not install speedtest-cli. Please install it manually.${NC}"
+            return 1
+        fi
+    fi
+    
+    echo -e "${CYAN}Testing download and upload speed...${NC}"
+    speedtest-cli --simple
+    
+    echo -e "\n${CYAN}Testing latency to 1.1.1.1...${NC}"
+    ping -c 5 1.1.1.1 | grep -A1 "statistics"
+}
 
-    # Reset IPv6
-    sysctl -w net.ipv6.conf.all.disable_ipv6=0 >/dev/null
-    sysctl -w net.ipv6.conf.default.disable_ipv6=0 >/dev/null
-    sed -i '/net.ipv6.conf.all.disable_ipv6=/d' /etc/sysctl.conf
-    sed -i '/net.ipv6.conf.default.disable_ipv6=/d' /etc/sysctl.conf
+# Show Current Settings
+show_settings() {
+    echo -e "\n${YELLOW}Current Configuration:${NC}"
+    echo -e "BBR Enabled: ${BOLD}$ENABLE_BBR${NC}"
+    echo -e "TCP Fast Open: ${BOLD}$TCP_FASTOPEN${NC}"
+    echo -e "VIP Mode: ${BOLD}$VIP_MODE${NC}"
+    echo -e "MTU: ${BOLD}$CURRENT_MTU${NC}"
+    echo -e "DNS Servers: ${BOLD}${DNS_SERVERS[@]}${NC}"
+    
+    if [ "$VIP_MODE" = true ]; then
+        echo -e "VIP Subnet: ${BOLD}$VIP_SUBNET${NC}"
+        echo -e "VIP Gateway: ${BOLD}$VIP_GATEWAY${NC}"
+    fi
+    
+    echo -e "\n${YELLOW}Current Kernel Parameters:${NC}"
+    sysctl -a 2>/dev/null | grep -E "net.core.default_qdisc|net.ipv4.tcp_congestion_control|net.ipv4.tcp_fastopen"
+    
+    echo -e "\n${YELLOW}Interface Settings:${NC}"
+    echo -e "Current Interface MTU: ${BOLD}$(cat /sys/class/net/$NETWORK_INTERFACE/mtu 2>/dev/null)${NC}"
+}
 
-    # Reset IPTables
-    iptables -t nat -F
-
-    # Remove BBR settings
-    sed -i '/net.core.default_qdisc=fq/d' /etc/sysctl.conf
-    sed -i '/net.ipv4.tcp_congestion_control=bbr/d' /etc/sysctl.conf
-    sed -i '/net.ipv4.tcp_fastopen=/d' /etc/sysctl.conf
-    sed -i '/net.ipv4.tcp_syncookies=/d' /etc/sysctl.conf
-    sed -i '/net.ipv4.tcp_tw_reuse=/d' /etc/sysctl.conf
-    sed -i '/net.ipv4.tcp_fin_timeout=/d' /etc/sysctl.conf
-    sed -i '/net.ipv4.ip_local_port_range=/d' /etc/sysctl.conf
-    sed -i '/net.ipv4.tcp_max_syn_backlog=/d' /etc/sysctl.conf
-    sed -i '/net.core.somaxconn=/d' /etc/sysctl.conf
-    sed -i '/net.core.netdev_max_backlog=/d' /etc/sysctl.conf
-    sed -i '/net.ipv4.tcp_slow_start_after_idle=/d' /etc/sysctl.conf
-    sed -i '/net.ipv4.tcp_mtu_probing=/d' /etc/sysctl.conf
-    sysctl -p >/dev/null 2>&1
-
-    # Remove config file
+# Uninstall All Changes
+uninstall_all() {
+    echo -e "\n${BOLD_RED}Uninstalling all changes...${NC}"
+    
+    # Restore original sysctl settings
+    if [[ -f "$SYSCTL_BACKUP" ]]; then
+        cp "$SYSCTL_BACKUP" /etc/sysctl.conf
+        sysctl -p
+        echo -e "${GREEN}Restored original sysctl settings${NC}"
+    fi
+    
+    # Remove configuration files
     rm -f "$CONFIG_FILE"
-
-    echo -e "${GREEN}All changes have been reset to default!${NC}"
+    echo -e "${GREEN}Removed configuration file${NC}"
+    
+    # Remove cron job
+    rm -f "$CRON_JOB_FILE"
+    echo -e "${GREEN}Removed cron job${NC}"
+    
+    # Reset MTU to default 1500
+    ifconfig $NETWORK_INTERFACE mtu 1500
+    echo -e "${GREEN}Reset MTU to default 1500${NC}"
+    
+    # Reset DNS to Google DNS
+    echo "nameserver 1.1.1.1" > /etc/resolv.conf
+    echo "nameserver 1.1.1.1." >> /etc/resolv.conf
+    echo -e "${GREEN}Reset DNS to Google DNS${NC}"
+    
+    echo -e "\n${GREEN}Uninstallation complete!${NC}"
+    read -p "Press [Enter] to continue..."
 }
 
 # Main Menu
 show_menu() {
-    load_config
     while true; do
         show_header
-        echo -e "${BOLD}Main Menu:${NC}"
-        echo -e "1) Install BBR Optimization"
-        echo -e "2) Configure MTU"
-        echo -e "3) Configure DNS"
-        echo -e "4) Firewall Management"
-        echo -e "5) Reset Network Settings"
-        echo -e "6) Manage ICMP Ping"
-        echo -e "7) Manage IPv6"
-        echo -e "8) Setup IPTable Tunnel"
-        echo -e "9) Ping MTU Size Test"
-        echo -e "10) Reset ALL Changes"
-        echo -e "11) Exit"
+        echo -e "\n${BOLD}Main Menu:${NC}"
+        echo -e "${CYAN}1) Apply Full Optimization${NC}"
+        echo -e "${CYAN}3) Reset Network Settings${NC}"
+        echo -e "${CYAN}4) Install Auto-Reset Cron Job${NC}"
+        echo -e "${PURPLE}6) Configure VIP Settings${NC}"
+        echo -e "${PURPLE}7) Configure MTU${NC}"
+        echo -e "${PURPLE}8) Configure DNS${NC}"
+        echo -e "${GREEN}9) Show Current Settings${NC}"
+        echo -e "${GREEN}10) Test Network Speed${NC}"
+        echo -e "${BLUE}12) Save Configuration${NC}"
+        echo -e "${RED}13) Reboot Server${NC}"
+        echo -e "${BOLD_RED}14) Uninstall (Remove All Changes)${NC}"
+        echo -e "${BOLD_RED}15) Exit${NC}"
         
-        read -p "Enter your choice [1-11]: " choice
+        read -p "Please enter your choice [1-15]: " choice
         
         case $choice in
             1)
-                install_bbr
-                ;;
-            2)
-                echo -e "\nCurrent MTU: $CURRENT_MTU"
-                read -p "Enter new MTU value (recommended 1420): " new_mtu
-                if [[ "$new_mtu" =~ ^[0-9]+$ ]]; then
-                    configure_mtu "$new_mtu"
-                else
-                    echo -e "${RED}Invalid MTU value!${NC}"
-                fi
+                backup_sysctl
+                apply_kernel_params
+                verify_bbr
                 ;;
             3)
-                echo -e "\nCurrent DNS: $CURRENT_DNS"
-                read -p "Enter new DNS servers (space separated): " new_dns
-                DNS_SERVERS=($new_dns)
-                update_dns
-                ;;
-            4)
-                manage_firewall
-                ;;
-            5)
                 reset_network
                 ;;
+            4)
+                setup_cron_job
+                ;;
             6)
-                manage_icmp
+                configure_vip
                 ;;
             7)
-                manage_ipv6
+                configure_mtu
                 ;;
             8)
-                manage_tunnel
+                configure_dns
                 ;;
             9)
-                ping_mtu
+                show_settings
                 ;;
             10)
-                reset_all
+                test_speed
                 ;;
-            11)
+            12)
+                save_config
+                ;;
+            13)
+                echo -e "${YELLOW}Preparing to reboot server...${NC}"
+                save_config
+                echo -e "${RED}Server will now reboot...${NC}"
+                sleep 3
+                reboot
+                ;;
+            14)
+                uninstall_all
+                ;;
+            15)
                 echo -e "${GREEN}Exiting...${NC}"
                 exit 0
                 ;;
             *)
-                echo -e "${RED}Invalid option!${NC}"
+                echo -e "${BOLD_RED}Invalid option!${NC}"
                 ;;
         esac
         
-        read -p "Press [Enter] to continue..."
+        read -p "Press [Enter] to return to main menu..."
     done
 }
 
 # Main Execution
-check_root
-show_menu
+main() {
+    check_root
+    detect_distro
+    load_config
+    show_menu
+}
+
+# Handle command line arguments
+case "$1" in
+    "--reset")
+        reset_network
+        exit $?
+        ;;
+    *)
+        main
+        ;;
+esac
