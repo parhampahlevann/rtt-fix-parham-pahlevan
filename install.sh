@@ -2,14 +2,14 @@
 
 # Global Configuration
 SCRIPT_NAME="Ultimate Network Optimizer"
-SCRIPT_VERSION="8.4"
+SCRIPT_VERSION="8.5"
 AUTHOR="Parham Pahleven"
 CONFIG_FILE="/etc/network_optimizer.conf"
 LOG_FILE="/var/log/network_optimizer.log"
 NETWORK_INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
 DEFAULT_MTU=1500
 CURRENT_MTU=$(cat /sys/class/net/"$NETWORK_INTERFACE"/mtu 2>/dev/null || echo $DEFAULT_MTU)
-DNS_SERVERS=("1.1.1.1")
+DNS_SERVERS=("1.1.1.1" "1.0.0.1")
 CURRENT_DNS=$(grep nameserver /etc/resolv.conf 2>/dev/null | awk '{print $2}' | tr '\n' ' ')
 
 # Initialize logging
@@ -28,18 +28,18 @@ BOLD='\033[1m'
 
 # Check Dependencies
 check_dependencies() {
-    local deps=("iproute2" "net-tools" "iptables" "bc" "resolvconf" "network-manager")
+    local deps=("ip" "ping" "iptables" "bc" "dig" "sysctl")
     local missing_deps=()
     
     for dep in "${deps[@]}"; do
-        if ! command -v "${dep%% *}" >/dev/null 2>&1; then
+        if ! command -v "${dep}" >/dev/null 2>&1; then
             missing_deps+=("$dep")
         fi
     done
     
     if [ ${#missing_deps[@]} -gt 0 ]; then
         echo -e "${YELLOW}Installing missing dependencies: ${missing_deps[*]}${NC}"
-        apt-get update && apt-get install -y "${missing_deps[@]}" || {
+        apt-get update && apt-get install -y iproute2 iputils-ping iptables bc dnsutils procps || {
             echo -e "${RED}Failed to install dependencies!${NC}"
             exit 1
         }
@@ -52,24 +52,27 @@ save_config() {
 # Network Optimizer Configuration
 MTU=$CURRENT_MTU
 DNS_SERVERS=(${DNS_SERVERS[@]})
+NETWORK_INTERFACE=$NETWORK_INTERFACE
 EOL
+    chmod 600 "$CONFIG_FILE"
 }
 
 # Load Configuration
 load_config() {
     if [ -f "$CONFIG_FILE" ]; then
         source "$CONFIG_FILE"
-        CURRENT_MTU=$MTU
+        CURRENT_MTU=${MTU:-1500}
         DNS_SERVERS=(${DNS_SERVERS[@]})
+        NETWORK_INTERFACE=${NETWORK_INTERFACE:-$(ip route | grep default | awk '{print $5}' | head -n1)}
     fi
 }
 
 # Header Display
 show_header() {
     clear
-    echo -e "${BLUE}${BOLD}╔════════════════════════════════════════════════╗"
-    echo -e "║   ${SCRIPT_NAME} ${SCRIPT_VERSION} - ${AUTHOR}         ║"
-    echo -e "╚════════════════════════════════════════════════╝${NC}"
+    echo -e "${BLUE}${BOLD}╔══════════════════════════════════════════════════════╗"
+    echo -e "║           $SCRIPT_NAME ${SCRIPT_VERSION} - $AUTHOR           ║"
+    echo -e "╚══════════════════════════════════════════════════════╝${NC}"
     echo -e "${YELLOW}Interface: ${BOLD}${NETWORK_INTERFACE:-Not detected}${NC}"
     echo -e "${YELLOW}Current MTU: ${BOLD}$CURRENT_MTU${NC}"
     echo -e "${YELLOW}Current DNS: ${BOLD}${CURRENT_DNS:-Not detected}${NC}"
@@ -108,6 +111,13 @@ show_header() {
     else
         echo -e "${YELLOW}IPv6: ${GREEN}Enabled${NC}"
     fi
+    
+    # Show Connection Status
+    if _test_connectivity; then
+        echo -e "${YELLOW}Internet: ${GREEN}Connected${NC}"
+    else
+        echo -e "${YELLOW}Internet: ${RED}Disconnected${NC}"
+    fi
     echo
 }
 
@@ -139,7 +149,7 @@ ping_mtu() {
     fi
 }
 
-# Universal MTU Configuration
+# Universal MTU Configuration - FIXED
 configure_mtu() {
     local new_mtu=$1
     local old_mtu=$(cat /sys/class/net/"$NETWORK_INTERFACE"/mtu 2>/dev/null || echo $DEFAULT_MTU)
@@ -149,105 +159,206 @@ configure_mtu() {
         return 1
     fi
 
+    echo -e "${YELLOW}Setting MTU to $new_mtu on $NETWORK_INTERFACE...${NC}"
+
     # Set temporary MTU
     if ! ip link set dev "$NETWORK_INTERFACE" mtu "$new_mtu" 2>/dev/null; then
         echo -e "${RED}Failed to set temporary MTU!${NC}"
         return 1
     fi
 
+    # Update kernel MTU file
+    echo "$new_mtu" > "/sys/class/net/$NETWORK_INTERFACE/mtu" 2>/dev/null
+
     # Test connectivity
+    echo -e "${YELLOW}Testing connectivity with new MTU...${NC}"
+    sleep 2
     if ! _test_connectivity; then
         echo -e "${RED}Connectivity test failed! Rolling back MTU...${NC}"
-        ip link set dev "$NETWORK_INTERFACE" mtu "$old_mtu" 2>/dev/null
+        ip link set dev "$NETWORK_INTERFACE" mtu "$old_mtu"
+        echo "$old_mtu" > "/sys/class/net/$NETWORK_INTERFACE/mtu" 2>/dev/null
         return 1
     fi
 
     # Apply permanent configuration
-    if [[ -d /etc/netplan ]]; then
-        local netplan_file=$(ls /etc/netplan/*.yaml 2>/dev/null | head -n1)
-        if [ -f "$netplan_file" ]; then
-            sed -i "/$NETWORK_INTERFACE:/,/^[^[:space:]]/ s/mtu: .*/mtu: $new_mtu/" "$netplan_file" || \
+    echo -e "${YELLOW}Making MTU change permanent...${NC}"
+    
+    # Netplan (Ubuntu 18.04+)
+    if [[ -d /etc/netplan ]] && ls /etc/netplan/*.yaml >/dev/null 2>&1; then
+        local netplan_file=$(ls /etc/netplan/*.yaml | head -n1)
+        if grep -q "$NETWORK_INTERFACE" "$netplan_file"; then
+            if grep -q "mtu:" "$netplan_file"; then
+                sed -i "/$NETWORK_INTERFACE:/,/^[^[:space:]]/ s/mtu:.*/mtu: $new_mtu/" "$netplan_file"
+            else
                 sed -i "/$NETWORK_INTERFACE:/a\      mtu: $new_mtu" "$netplan_file"
-            netplan apply >/dev/null 2>&1 || echo -e "${RED}Failed to apply netplan!${NC}"
+            fi
+            netplan apply >/dev/null 2>&1 && echo -e "${GREEN}Netplan configuration updated${NC}"
         fi
+    
+    # Network interfaces (Debian)
     elif [[ -f /etc/network/interfaces ]]; then
-        grep -q "iface $NETWORK_INTERFACE" /etc/network/interfaces && \
-            sed -i "/iface $NETWORK_INTERFACE/,/^$/ s/mtu .*/mtu $new_mtu/" /etc/network/interfaces || \
-            echo "mtu $new_mtu" >> /etc/network/interfaces
-        systemctl restart networking >/dev/null 2>&1 || echo -e "${RED}Failed to restart networking!${NC}"
+        if grep -q "$NETWORK_INTERFACE" /etc/network/interfaces; then
+            if grep -q "mtu" /etc/network/interfaces; then
+                sed -i "/iface $NETWORK_INTERFACE/,/^$/ s/mtu.*/mtu $new_mtu/" /etc/network/interfaces
+            else
+                sed -i "/iface $NETWORK_INTERFACE/ a\    mtu $new_mtu" /etc/network/interfaces
+            fi
+        fi
+    
+    # NetworkManager
     elif command -v nmcli >/dev/null 2>&1; then
-        nmcli con mod "$NETWORK_INTERFACE" ipv4.mtu "$new_mtu" ipv6.mtu "$new_mtu" 2>/dev/null
-        nmcli con up "$NETWORK_INTERFACE" >/dev/null 2>&1 || echo -e "${RED}Failed to apply NetworkManager settings!${NC}"
+        local connection_name=$(nmcli -t -f DEVICE,NAME con show | grep "^$NETWORK_INTERFACE:" | cut -d: -f2 | head -n1)
+        if [ -n "$connection_name" ]; then
+            nmcli connection modify "$connection_name" 802-3-ethernet.mtu $new_mtu 2>/dev/null
+            nmcli connection up "$connection_name" >/dev/null 2>&1
+        fi
     fi
 
     CURRENT_MTU=$new_mtu
     save_config
-    echo -e "${GREEN}MTU successfully set to $new_mtu${NC}"
+    echo -e "${GREEN}MTU successfully set to $new_mtu and made permanent${NC}"
     return 0
 }
 
-# Update DNS Configuration
+# Update DNS Configuration - COMPLETELY FIXED
 update_dns() {
+    echo -e "${YELLOW}Setting DNS servers: ${DNS_SERVERS[*]}${NC}"
+    
     local dns_configured=false
+    local connection_name=""
 
-    # Check if NetworkManager is active
+    # Method 1: NetworkManager (modern systems)
     if command -v nmcli >/dev/null 2>&1 && systemctl is-active NetworkManager >/dev/null 2>&1; then
-        echo -e "${YELLOW}Configuring DNS via NetworkManager...${NC}"
-        nmcli con mod "$NETWORK_INTERFACE" ipv4.dns "${DNS_SERVERS[*]}" 2>/dev/null
-        nmcli con mod "$NETWORK_INTERFACE" ipv4.ignore-auto-dns yes 2>/dev/null
-        nmcli con up "$NETWORK_INTERFACE" >/dev/null 2>&1 || {
-            echo -e "${RED}Failed to apply NetworkManager DNS settings!${NC}"
-        }
-        dns_configured=true
-        echo -e "${GREEN}DNS servers set via NetworkManager: ${DNS_SERVERS[*]}${NC}"
-    fi
-
-    # Check if systemd-resolved is active
-    if systemctl is-active systemd-resolved >/dev/null 2>&1; then
-        echo -e "${YELLOW}Configuring DNS via systemd-resolved...${NC}"
-        for dns in "${DNS_SERVERS[@]}"; do
-            resolvectl set-dns "$NETWORK_INTERFACE" "$dns" 2>/dev/null || {
-                echo -e "${YELLOW}Warning: Failed to set DNS $dns via resolvectl${NC}"
-            }
-        done
-        resolvectl set-domain "$NETWORK_INTERFACE" "~." 2>/dev/null
-        resolvectl flush-caches >/dev/null 2>&1
-        dns_configured=true
-        echo -e "${GREEN}DNS servers set via systemd-resolved: ${DNS_SERVERS[*]}${NC}"
-
-        # Ensure systemd-resolved writes to resolv.conf
-        if [ -f /etc/systemd/resolved.conf ]; then
-            sed -i '/^DNS=/d' /etc/systemd/resolved.conf
-            echo "DNS=${DNS_SERVERS[*]}" >> /etc/systemd/resolved.conf
-            systemctl restart systemd-resolved >/dev/null 2>&1
+        connection_name=$(nmcli -t -f DEVICE,NAME con show | grep "^$NETWORK_INTERFACE:" | cut -d: -f2 | head -n1)
+        if [ -n "$connection_name" ]; then
+            echo -e "${YELLOW}Configuring DNS via NetworkManager: $connection_name${NC}"
+            
+            # Set IPv4 DNS
+            nmcli con mod "$connection_name" ipv4.dns "$(echo ${DNS_SERVERS[@]} | tr ' ' ',')"
+            nmcli con mod "$connection_name" ipv4.ignore-auto-dns yes
+            nmcli con mod "$connection_name" ipv4.may-fail no
+            
+            # Set IPv6 DNS
+            nmcli con mod "$connection_name" ipv6.dns "$(echo ${DNS_SERVERS[@]} | tr ' ' ',')"
+            nmcli con mod "$connection_name" ipv6.ignore-auto-dns yes
+            nmcli con mod "$connection_name" ipv6.may-fail no
+            
+            # Apply changes
+            nmcli con down "$connection_name" 2>/dev/null
+            sleep 2
+            nmcli con up "$connection_name" 2>/dev/null
+            
+            dns_configured=true
+            echo -e "${GREEN}DNS set via NetworkManager${NC}"
         fi
     fi
 
-    # Fallback to resolv.conf for older systems or if above methods fail
+    # Method 2: systemd-resolved
+    if command -v systemctl >/dev/null 2>&1 && [ "$dns_configured" = false ]; then
+        if systemctl is-active systemd-resolved >/dev/null 2>&1; then
+            echo -e "${YELLOW}Configuring DNS via systemd-resolved...${NC}"
+            
+            # Create resolved.conf
+            cat > /etc/systemd/resolved.conf <<EOL
+[Resolve]
+DNS=${DNS_SERVERS[*]}
+Domains=~.
+DNSOverTLS=opportunistic
+DNSSEC=allow-downgrade
+Cache=yes
+DNSStubListener=yes
+EOL
+
+            # Set per-interface DNS
+            for dns in "${DNS_SERVERS[@]}"; do
+                resolvectl dns "$NETWORK_INTERFACE" "$dns" 2>/dev/null || true
+            done
+            
+            systemctl restart systemd-resolved
+            resolvectl flush-caches
+            
+            dns_configured=true
+            echo -e "${GREEN}DNS set via systemd-resolved${NC}"
+        fi
+    fi
+
+    # Method 3: Traditional resolv.conf
     if [ "$dns_configured" = false ]; then
         echo -e "${YELLOW}Configuring DNS via /etc/resolv.conf...${NC}"
-        chattr -i /etc/resolv.conf 2>/dev/null
-        echo "# Generated by $SCRIPT_NAME" > /etc/resolv.conf
-        for dns in "${DNS_SERVERS[@]}"; do
-            echo "nameserver $dns" >> /etc/resolv.conf
-        done
-        # Prevent DHCP from overwriting resolv.conf
-        if command -v resolvconf >/dev/null 2>&1; then
-            echo "nameserver ${DNS_SERVERS[*]}" > /etc/resolvconf/resolv.conf.d/base
-            resolvconf -u >/dev/null 2>&1
-        fi
-        chattr +i /etc/resolv.conf 2>/dev/null || echo -e "${YELLOW}Warning: Could not make resolv.conf immutable${NC}"
+        
+        # Remove immutable attribute if set
+        chattr -i /etc/resolv.conf 2>/dev/null || true
+        
+        # Backup original
+        cp /etc/resolv.conf /etc/resolv.conf.backup.$(date +%Y%m%d%H%M%S) 2>/dev/null || true
+        
+        # Create new resolv.conf
+        cat > /etc/resolv.conf <<EOL
+# Generated by $SCRIPT_NAME
+$(for dns in "${DNS_SERVERS[@]}"; do echo "nameserver $dns"; done)
+options rotate timeout:2 attempts:3
+EOL
+
+        # Make resolv.conf immutable
+        chattr +i /etc/resolv.conf 2>/dev/null && \
+        echo -e "${GREEN}resolv.conf made immutable${NC}" || \
+        echo -e "${YELLOW}Warning: Could not make resolv.conf immutable${NC}"
     fi
 
-    # Prevent DHCP from overwriting DNS
+    # Method 4: resolvconf utility
+    if command -v resolvconf >/dev/null 2>&1; then
+        echo -e "${YELLOW}Configuring DNS via resolvconf...${NC}"
+        cat > /etc/resolvconf/resolv.conf.d/base <<EOL
+$(for dns in "${DNS_SERVERS[@]}"; do echo "nameserver $dns"; done)
+EOL
+        resolvconf -u
+    fi
+
+    # Method 5: DHCP configuration
     if [ -f /etc/dhcp/dhclient.conf ]; then
-        grep -q "supersede domain-name-servers" /etc/dhcp/dhclient.conf || \
-            echo "supersede domain-name-servers ${DNS_SERVERS[*]};" >> /etc/dhcp/dhclient.conf
+        echo -e "${YELLOW}Configuring DHCP to prevent DNS overwrites...${NC}"
+        
+        # Remove existing supersede lines
+        sed -i '/supersede domain-name-servers/d' /etc/dhcp/dhclient.conf
+        
+        # Add new supersede line
+        echo "supersede domain-name-servers ${DNS_SERVERS[*]};" >> /etc/dhcp/dhclient.conf
+    fi
+
+    # Method 6: Disable NetworkManager DNS management
+    if [ -d /etc/NetworkManager/conf.d ] && [ "$dns_configured" = true ]; then
+        cat > /etc/NetworkManager/conf.d/90-dns-none.conf <<EOL
+[main]
+dns=none
+rc-manager=resolvconf
+EOL
+        systemctl restart NetworkManager 2>/dev/null || true
     fi
 
     CURRENT_DNS="${DNS_SERVERS[*]}"
     save_config
-    echo -e "${GREEN}DNS servers updated successfully and made persistent${NC}"
+    
+    # Verify DNS configuration
+    echo -e "${YELLOW}Verifying DNS configuration...${NC}"
+    sleep 3
+    
+    local current_dns=$(grep -E '^nameserver' /etc/resolv.conf 2>/dev/null | awk '{print $2}' | tr '\n' ' ')
+    echo -e "${GREEN}Current DNS in resolv.conf: $current_dns${NC}"
+    
+    # Test DNS resolution
+    if timeout 5 dig +short google.com @${DNS_SERVERS[0]} >/dev/null 2>&1; then
+        echo -e "${GREEN}✓ DNS resolution test successful${NC}"
+    else
+        echo -e "${RED}✗ DNS resolution test failed${NC}"
+        echo -e "${YELLOW}Trying alternative DNS server...${NC}"
+        if timeout 5 dig +short google.com @${DNS_SERVERS[1]} >/dev/null 2>&1; then
+            echo -e "${GREEN}✓ Alternative DNS server works${NC}"
+        else
+            echo -e "${RED}✗ All DNS servers failed${NC}"
+        fi
+    fi
+
+    echo -e "${GREEN}DNS configuration completed successfully!${NC}"
 }
 
 # Install BBR
@@ -259,10 +370,12 @@ install_bbr() {
         return 1
     fi
 
+    echo -e "${YELLOW}Installing and configuring BBR...${NC}"
+
     # Apply BBR settings
     cat >> /etc/sysctl.conf <<EOL
 
-# BBR Optimization
+# BBR Optimization - Added by $SCRIPT_NAME
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 net.ipv4.tcp_fastopen=3
@@ -277,20 +390,25 @@ net.ipv4.tcp_slow_start_after_idle=0
 net.ipv4.tcp_mtu_probing=1
 EOL
 
-    sysctl -p >/dev/null 2>&1 || echo -e "${RED}Failed to apply sysctl settings!${NC}"
+    # Apply sysctl settings
+    if sysctl -p >/dev/null 2>&1; then
+        echo -e "${GREEN}Sysctl settings applied successfully${NC}"
+    else
+        echo -e "${RED}Failed to apply some sysctl settings${NC}"
+    fi
 
-    # Set default MTU and DNS
+    # Set optimized MTU and DNS
     configure_mtu 1420
-    DNS_SERVERS=("1.1.1.1")
+    DNS_SERVERS=("1.1.1.1" "1.0.0.1")
     update_dns
 
     # Verify BBR
     local current_cc=$(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | awk '{print $3}')
     if [[ "$current_cc" == "bbr" ]]; then
-        echo -e "${GREEN}BBR successfully installed and configured${NC}"
+        echo -e "${GREEN}✓ BBR successfully installed and configured${NC}"
         return 0
     else
-        echo -e "${RED}Failed to enable BBR! Current: $current_cc${NC}"
+        echo -e "${RED}✗ Failed to enable BBR! Current: $current_cc${NC}"
         return 1
     fi
 }
@@ -310,7 +428,7 @@ manage_firewall() {
     case $fw_choice in
         1)
             if command -v ufw >/dev/null 2>&1; then
-                ufw enable
+                ufw --force enable
                 echo -e "${GREEN}UFW firewall has been enabled${NC}"
             elif command -v firewall-cmd >/dev/null 2>&1; then
                 systemctl start firewalld
@@ -337,23 +455,21 @@ manage_firewall() {
             read -p "Enter protocol (tcp/udp, default is tcp): " protocol
             protocol=${protocol:-tcp}
             
-            # Validate port and protocol
             if [[ ! "$port" =~ ^[0-9]+$ || $port -lt 1 || $port -gt 65535 ]]; then
-                echo -e "${RED}Invalid port number! Must be between 1 and 65535.${NC}"
+                echo -e "${RED}Invalid port number!${NC}"
             elif [[ ! "$protocol" =~ ^(tcp|udp)$ ]]; then
-                echo -e "${RED}Invalid protocol! Must be 'tcp' or 'udp'.${NC}"
+                echo -e "${RED}Invalid protocol!${NC}"
             else
                 if command -v ufw >/dev/null 2>&1; then
                     ufw allow "$port/$protocol"
-                    echo -e "${GREEN}Port $port/$protocol has been opened in UFW${NC}"
+                    echo -e "${GREEN}Port $port/$protocol opened${NC}"
                 elif command -v firewall-cmd >/dev/null 2>&1; then
                     firewall-cmd --permanent --add-port="$port/$protocol"
                     firewall-cmd --reload
-                    echo -e "${GREEN}Port $port/$protocol has been opened in firewalld${NC}"
+                    echo -e "${GREEN}Port $port/$protocol opened${NC}"
                 else
                     iptables -A INPUT -p "$protocol" --dport "$port" -j ACCEPT
-                    iptables-save > /etc/iptables/rules.v4 2>/dev/null
-                    echo -e "${GREEN}Port $port/$protocol has been opened in iptables${NC}"
+                    echo -e "${GREEN}Port $port/$protocol opened via iptables${NC}"
                 fi
             fi
             ;;
@@ -362,35 +478,30 @@ manage_firewall() {
             read -p "Enter protocol (tcp/udp, default is tcp): " protocol
             protocol=${protocol:-tcp}
             
-            # Validate port and protocol
             if [[ ! "$port" =~ ^[0-9]+$ || $port -lt 1 || $port -gt 65535 ]]; then
-                echo -e "${RED}Invalid port number! Must be between 1 and 65535.${NC}"
+                echo -e "${RED}Invalid port number!${NC}"
             elif [[ ! "$protocol" =~ ^(tcp|udp)$ ]]; then
-                echo -e "${RED}Invalid protocol! Must be 'tcp' or 'udp'.${NC}"
+                echo -e "${RED}Invalid protocol!${NC}"
             else
                 if command -v ufw >/dev/null 2>&1; then
-                    ufw deny "$port/$protocol"
-                    echo -e "${GREEN}Port $port/$protocol has been closed in UFW${NC}"
+                    ufw delete allow "$port/$protocol"
+                    echo -e "${GREEN}Port $port/$protocol closed${NC}"
                 elif command -v firewall-cmd >/dev/null 2>&1; then
                     firewall-cmd --permanent --remove-port="$port/$protocol"
                     firewall-cmd --reload
-                    echo -e "${GREEN}Port $port/$protocol has been closed in firewalld${NC}"
+                    echo -e "${GREEN}Port $port/$protocol closed${NC}"
                 else
                     iptables -D INPUT -p "$protocol" --dport "$port" -j ACCEPT 2>/dev/null
-                    iptables-save > /etc/iptables/rules.v4 2>/dev/null
-                    echo -e "${GREEN}Port $port/$protocol has been closed in iptables${NC}"
+                    echo -e "${GREEN}Port $port/$protocol closed via iptables${NC}"
                 fi
             fi
             ;;
         5)
             if command -v ufw >/dev/null 2>&1; then
-                echo -e "\n${YELLOW}UFW Open Ports:${NC}"
                 ufw status verbose
             elif command -v firewall-cmd >/dev/null 2>&1; then
-                echo -e "\n${YELLOW}Firewalld Open Ports:${NC}"
                 firewall-cmd --list-ports
             else
-                echo -e "\n${YELLOW}iptables Open Ports:${NC}"
                 iptables -L INPUT -n --line-numbers | grep ACCEPT
             fi
             ;;
@@ -409,8 +520,8 @@ manage_firewall() {
 # ICMP Ping Management
 manage_icmp() {
     echo -e "\n${YELLOW}ICMP Ping Management${NC}"
-    echo -e "1) Block ICMP Ping (Disable Ping)"
-    echo -e "2) Allow ICMP Ping (Enable Ping)"
+    echo -e "1) Block ICMP Ping"
+    echo -e "2) Allow ICMP Ping"
     echo -e "3) Back to Main Menu"
     
     read -p "Enter your choice [1-3]: " icmp_choice
@@ -418,13 +529,11 @@ manage_icmp() {
     case $icmp_choice in
         1)
             iptables -A INPUT -p icmp --icmp-type echo-request -j DROP
-            iptables-save > /etc/iptables/rules.v4 2>/dev/null
-            echo -e "${GREEN}ICMP Ping is now BLOCKED!${NC}"
+            echo -e "${GREEN}ICMP Ping blocked${NC}"
             ;;
         2)
             iptables -D INPUT -p icmp --icmp-type echo-request -j DROP 2>/dev/null
-            iptables-save > /etc/iptables/rules.v4 2>/dev/null
-            echo -e "${GREEN}ICMP Ping is now ALLOWED!${NC}"
+            echo -e "${GREEN}ICMP Ping allowed${NC}"
             ;;
         3)
             return
@@ -433,6 +542,11 @@ manage_icmp() {
             echo -e "${RED}Invalid option!${NC}"
             ;;
     esac
+    
+    # Save iptables rules
+    if command -v iptables-save >/dev/null 2>&1; then
+        iptables-save > /etc/iptables/rules.v4 2>/dev/null
+    fi
     
     read -p "Press [Enter] to continue..."
     manage_icmp
@@ -453,14 +567,14 @@ manage_ipv6() {
             sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null
             echo "net.ipv6.conf.all.disable_ipv6=1" >> /etc/sysctl.conf
             echo "net.ipv6.conf.default.disable_ipv6=1" >> /etc/sysctl.conf
-            echo -e "${GREEN}IPv6 has been DISABLED!${NC}"
+            echo -e "${GREEN}IPv6 disabled${NC}"
             ;;
         2)
             sysctl -w net.ipv6.conf.all.disable_ipv6=0 >/dev/null
             sysctl -w net.ipv6.conf.default.disable_ipv6=0 >/dev/null
             sed -i '/net.ipv6.conf.all.disable_ipv6/d' /etc/sysctl.conf
             sed -i '/net.ipv6.conf.default.disable_ipv6/d' /etc/sysctl.conf
-            echo -e "${GREEN}IPv6 has been ENABLED!${NC}"
+            echo -e "${GREEN}IPv6 enabled${NC}"
             ;;
         3)
             return
@@ -486,30 +600,28 @@ manage_tunnel() {
     
     case $tunnel_choice in
         1)
-            read -p "Enter Iran IP/CIDR (e.g., 192.168.1.0/24 or 1.1.1.1): " iran_ip
+            read -p "Enter Iran IP/CIDR (e.g., 192.168.1.0/24): " iran_ip
             if [[ "$iran_ip" =~ ^[0-9./]+$ ]]; then
                 iptables -t nat -A POSTROUTING -d "$iran_ip" -j ACCEPT
-                iptables-save > /etc/iptables/rules.v4 2>/dev/null
-                echo -e "${GREEN}Iran IP ($iran_ip) is now routed directly!${NC}"
+                echo -e "${GREEN}Route added for $iran_ip${NC}"
             else
-                echo -e "${RED}Invalid IP/CIDR format!${NC}"
+                echo -e "${RED}Invalid IP/CIDR!${NC}"
             fi
             ;;
         2)
             read -p "Enter Foreign IP/CIDR (e.g., 1.1.1.1/32): " foreign_ip
-            read -p "Enter Gateway/VPN IP (e.g., 10.8.0.1): " gateway_ip
+            read -p "Enter Gateway IP (e.g., 10.8.0.1): " gateway_ip
             if [[ "$foreign_ip" =~ ^[0-9./]+$ && "$gateway_ip" =~ ^[0-9.]+$ ]]; then
-                ip route add "$foreign_ip" via "$gateway_ip" 2>/dev/null || \
-                    echo -e "${RED}Failed to add route!${NC}"
-                echo -e "${GREEN}Foreign IP ($foreign_ip) is now routed via $gateway_ip!${NC}"
+                ip route add "$foreign_ip" via "$gateway_ip" 2>/dev/null && \
+                echo -e "${GREEN}Route added: $foreign_ip via $gateway_ip${NC}" || \
+                echo -e "${RED}Failed to add route!${NC}"
             else
-                echo -e "${RED}Invalid IP/CIDR or Gateway format!${NC}"
+                echo -e "${RED}Invalid IP/CIDR or Gateway!${NC}"
             fi
             ;;
         3)
             iptables -t nat -F
-            iptables-save > /etc/iptables/rules.v4 2>/dev/null
-            echo -e "${GREEN}IPTable rules have been reset!${NC}"
+            echo -e "${GREEN}IPTables rules reset${NC}"
             ;;
         4)
             return
@@ -519,67 +631,77 @@ manage_tunnel() {
             ;;
     esac
     
+    # Save rules
+    if command -v iptables-save >/dev/null 2>&1; then
+        iptables-save > /etc/iptables/rules.v4 2>/dev/null
+    fi
+    
     read -p "Press [Enter] to continue..."
     manage_tunnel
 }
 
 # Reset Network Settings
 reset_network() {
+    echo -e "${YELLOW}Resetting network settings...${NC}"
+    
     # Reset MTU
     ip link set dev "$NETWORK_INTERFACE" mtu 1500 2>/dev/null
+    echo "1500" > "/sys/class/net/$NETWORK_INTERFACE/mtu" 2>/dev/null
     CURRENT_MTU=1500
 
-    # Reset DNS
-    if command -v nmcli >/dev/null 2>&1 && systemctl is-active NetworkManager >/dev/null 2>&1; then
-        nmcli con mod "$NETWORK_INTERFACE" ipv4.dns "1.1.1.1" 2>/dev/null
-        nmcli con mod "$NETWORK_INTERFACE" ipv4.ignore-auto-dns no 2>/dev/null
-        nmcli con up "$NETWORK_INTERFACE" >/dev/null 2>&1
-    elif systemctl is-active systemd-resolved >/dev/null 2>&1; then
-        resolvectl set-dns "$NETWORK_INTERFACE" 1.1.1.1 2>/dev/null
-        resolvectl flush-caches >/dev/null 2>&1
-        if [ -f /etc/systemd/resolved.conf ]; then
-            sed -i '/^DNS=/d' /etc/systemd/resolved.conf
-            echo "DNS=1.1.1.1" >> /etc/systemd/resolved.conf
-            systemctl restart systemd-resolved >/dev/null 2>&1
-        fi
-    else
-        chattr -i /etc/resolv.conf 2>/dev/null
-        echo "nameserver 1.1.1.1" > /etc/resolv.conf
-        if command -v resolvconf >/dev/null 2>&1; then
-            echo "nameserver 1.1.1.1" > /etc/resolvconf/resolv.conf.d/base
-            resolvconf -u >/dev/null 2>&1
+    # Reset DNS - Multiple methods
+    local connection_name=""
+    
+    # NetworkManager
+    if command -v nmcli >/dev/null 2>&1; then
+        connection_name=$(nmcli -t -f DEVICE,NAME con show | grep "^$NETWORK_INTERFACE:" | cut -d: -f2 | head -n1)
+        if [ -n "$connection_name" ]; then
+            nmcli con mod "$connection_name" ipv4.ignore-auto-dns no
+            nmcli con mod "$connection_name" ipv6.ignore-auto-dns no
+            nmcli con mod "$connection_name" ipv4.dns ""
+            nmcli con mod "$connection_name" ipv6.dns ""
+            nmcli con down "$connection_name" 2>/dev/null
+            nmcli con up "$connection_name" 2>/dev/null
         fi
     fi
 
-    # Reset DHCP DNS settings
+    # systemd-resolved
+    if systemctl is-active systemd-resolved >/dev/null 2>&1; then
+        systemctl stop systemd-resolved
+        systemctl disable systemd-resolved 2>/dev/null
+    fi
+
+    # Traditional resolv.conf
+    chattr -i /etc/resolv.conf 2>/dev/null || true
+    cat > /etc/resolv.conf <<EOL
+nameserver 1.1.1.1
+nameserver 1.0.0.1
+options rotate
+EOL
+
+    # Remove NetworkManager DNS override
+    rm -f /etc/NetworkManager/conf.d/90-dns-none.conf 2>/dev/null
+    systemctl restart NetworkManager 2>/dev/null || true
+
+    # Remove DHCP override
     if [ -f /etc/dhcp/dhclient.conf ]; then
         sed -i '/supersede domain-name-servers/d' /etc/dhcp/dhclient.conf
     fi
 
-    CURRENT_DNS="1.1.1.1"
+    CURRENT_DNS="1.1.1.1 1.0.0.1"
+    save_config
 
-    # Apply changes
-    if [[ -d /etc/netplan ]]; then
-        local netplan_file=$(ls /etc/netplan/*.yaml 2>/dev/null | head -n1)
-        [ -f "$netplan_file" ] && sed -i "/mtu:/d" "$netplan_file" && netplan apply
-    elif [[ -f /etc/network/interfaces ]]; then
-        sed -i "/mtu/d" /etc/network/interfaces
-        systemctl restart networking >/dev/null 2>&1
-    elif command -v nmcli >/dev/null 2>&1; then
-        nmcli con mod "$NETWORK_INTERFACE" ipv4.mtu 1500 ipv6.mtu 1500 2>/dev/null
-        nmcli con up "$NETWORK_INTERFACE" >/dev/null 2>&1
-    fi
-
-    echo -e "${GREEN}Network settings have been reset!${NC}"
+    echo -e "${GREEN}Network settings reset to default!${NC}"
 }
 
 # Reset ALL Changes
 reset_all() {
+    echo -e "${YELLOW}Resetting ALL changes...${NC}"
+    
     reset_network
 
     # Reset ICMP
     iptables -D INPUT -p icmp --icmp-type echo-request -j DROP 2>/dev/null
-    iptables-save > /etc/iptables/rules.v4 2>/dev/null
 
     # Reset IPv6
     sysctl -w net.ipv6.conf.all.disable_ipv6=0 >/dev/null
@@ -589,9 +711,10 @@ reset_all() {
 
     # Reset IPTables
     iptables -t nat -F
-    iptables-save > /etc/iptables/rules.v4 2>/dev/null
+    iptables -F
 
-    # Remove BBR
+    # Remove BBR settings
+    sed -i '/# BBR Optimization/d' /etc/sysctl.conf
     sed -i '/net.core.default_qdisc=fq/d' /etc/sysctl.conf
     sed -i '/net.ipv4.tcp_congestion_control=bbr/d' /etc/sysctl.conf
     sed -i '/net.ipv4.tcp_fastopen/d' /etc/sysctl.conf
@@ -604,12 +727,19 @@ reset_all() {
     sed -i '/net.core.netdev_max_backlog/d' /etc/sysctl.conf
     sed -i '/net.ipv4.tcp_slow_start_after_idle/d' /etc/sysctl.conf
     sed -i '/net.ipv4.tcp_mtu_probing/d' /etc/sysctl.conf
+
+    # Apply sysctl
     sysctl -p >/dev/null 2>&1
 
-    # Remove config file
-    rm -f "$CONFIG_FILE"
+    # Save iptables
+    if command -v iptables-save >/dev/null 2>&1; then
+        iptables-save > /etc/iptables/rules.v4 2>/dev/null
+    fi
 
-    echo -e "${GREEN}All changes have been reset to default!${NC}"
+    # Remove config file
+    rm -f "$CONFIG_FILE" 2>/dev/null
+
+    echo -e "${GREEN}All changes have been completely reset!${NC}"
 }
 
 # Reboot System
