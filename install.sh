@@ -1,8 +1,7 @@
 #!/bin/bash
-
 # Global Configuration
 SCRIPT_NAME="Ultimate Network Optimizer"
-SCRIPT_VERSION="8.5"
+SCRIPT_VERSION="8.6"
 AUTHOR="Parham Pahleven"
 CONFIG_FILE="/etc/network_optimizer.conf"
 LOG_FILE="/var/log/network_optimizer.log"
@@ -76,7 +75,7 @@ show_header() {
     echo -e "${YELLOW}Interface: ${BOLD}${NETWORK_INTERFACE:-Not detected}${NC}"
     echo -e "${YELLOW}Current MTU: ${BOLD}$CURRENT_MTU${NC}"
     echo -e "${YELLOW}Current DNS: ${BOLD}${CURRENT_DNS:-Not detected}${NC}"
-
+    
     # Show BBR Status
     local bbr_status=$(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | awk '{print $3}' || echo "Unknown")
     if [[ "$bbr_status" == "bbr" ]]; then
@@ -84,7 +83,7 @@ show_header() {
     else
         echo -e "${YELLOW}BBR Status: ${RED}Disabled ($bbr_status)${NC}"
     fi
-
+    
     # Show Firewall Status
     if command -v ufw >/dev/null 2>&1; then
         local fw_status=$(ufw status | grep -o "active" || echo "inactive")
@@ -95,7 +94,7 @@ show_header() {
     else
         echo -e "${YELLOW}Firewall Status: ${BOLD}Not detected${NC}"
     fi
-
+    
     # Show ICMP Status
     local icmp_status=$(iptables -L INPUT -n 2>/dev/null | grep "icmp" | grep -o "DROP" || echo "ACCEPT")
     if [ "$icmp_status" == "DROP" ]; then
@@ -103,7 +102,7 @@ show_header() {
     else
         echo -e "${YELLOW}ICMP Ping: ${GREEN}Allowed${NC}"
     fi
-
+    
     # Show IPv6 Status
     local ipv6_status=$(sysctl net.ipv6.conf.all.disable_ipv6 2>/dev/null | awk '{print $3}' || echo "0")
     if [ "$ipv6_status" == "1" ]; then
@@ -153,23 +152,21 @@ ping_mtu() {
 configure_mtu() {
     local new_mtu=$1
     local old_mtu=$(cat /sys/class/net/"$NETWORK_INTERFACE"/mtu 2>/dev/null || echo $DEFAULT_MTU)
-
     if [[ ! "$new_mtu" =~ ^[0-9]+$ || $new_mtu -lt 68 || $new_mtu -gt 9000 ]]; then
         echo -e "${RED}Invalid MTU value! Must be between 68 and 9000.${NC}"
         return 1
     fi
-
     echo -e "${YELLOW}Setting MTU to $new_mtu on $NETWORK_INTERFACE...${NC}"
-
+    
     # Set temporary MTU
     if ! ip link set dev "$NETWORK_INTERFACE" mtu "$new_mtu" 2>/dev/null; then
         echo -e "${RED}Failed to set temporary MTU!${NC}"
         return 1
     fi
-
+    
     # Update kernel MTU file
     echo "$new_mtu" > "/sys/class/net/$NETWORK_INTERFACE/mtu" 2>/dev/null
-
+    
     # Test connectivity
     echo -e "${YELLOW}Testing connectivity with new MTU...${NC}"
     sleep 2
@@ -179,7 +176,7 @@ configure_mtu() {
         echo "$old_mtu" > "/sys/class/net/$NETWORK_INTERFACE/mtu" 2>/dev/null
         return 1
     fi
-
+    
     # Apply permanent configuration
     echo -e "${YELLOW}Making MTU change permanent...${NC}"
     
@@ -194,6 +191,7 @@ configure_mtu() {
             fi
             netplan apply >/dev/null 2>&1 && echo -e "${GREEN}Netplan configuration updated${NC}"
         fi
+    fi
     
     # Network interfaces (Debian)
     elif [[ -f /etc/network/interfaces ]]; then
@@ -204,6 +202,7 @@ configure_mtu() {
                 sed -i "/iface $NETWORK_INTERFACE/ a\    mtu $new_mtu" /etc/network/interfaces
             fi
         fi
+    fi
     
     # NetworkManager
     elif command -v nmcli >/dev/null 2>&1; then
@@ -213,7 +212,7 @@ configure_mtu() {
             nmcli connection up "$connection_name" >/dev/null 2>&1
         fi
     fi
-
+    
     CURRENT_MTU=$new_mtu
     save_config
     echo -e "${GREEN}MTU successfully set to $new_mtu and made permanent${NC}"
@@ -226,7 +225,7 @@ update_dns() {
     
     local dns_configured=false
     local connection_name=""
-
+    
     # Method 1: NetworkManager (modern systems)
     if command -v nmcli >/dev/null 2>&1 && systemctl is-active NetworkManager >/dev/null 2>&1; then
         connection_name=$(nmcli -t -f DEVICE,NAME con show | grep "^$NETWORK_INTERFACE:" | cut -d: -f2 | head -n1)
@@ -248,11 +247,17 @@ update_dns() {
             sleep 2
             nmcli con up "$connection_name" 2>/dev/null
             
-            dns_configured=true
-            echo -e "${GREEN}DNS set via NetworkManager${NC}"
+            # Check if DNS was applied
+            local nmcli_dns=$(nmcli -g ipv4.dns con show "$connection_name" 2>/dev/null)
+            if [[ "$nmcli_dns" == *"${DNS_SERVERS[0]}"* ]]; then
+                dns_configured=true
+                echo -e "${GREEN}DNS set via NetworkManager${NC}"
+            else
+                echo -e "${RED}Failed to set DNS via NetworkManager${NC}"
+            fi
         fi
     fi
-
+    
     # Method 2: systemd-resolved
     if command -v systemctl >/dev/null 2>&1 && [ "$dns_configured" = false ]; then
         if systemctl is-active systemd-resolved >/dev/null 2>&1; then
@@ -268,7 +273,7 @@ DNSSEC=allow-downgrade
 Cache=yes
 DNSStubListener=yes
 EOL
-
+            
             # Set per-interface DNS
             for dns in "${DNS_SERVERS[@]}"; do
                 resolvectl dns "$NETWORK_INTERFACE" "$dns" 2>/dev/null || true
@@ -277,11 +282,17 @@ EOL
             systemctl restart systemd-resolved
             resolvectl flush-caches
             
-            dns_configured=true
-            echo -e "${GREEN}DNS set via systemd-resolved${NC}"
+            # Check if DNS was applied
+            local resolved_dns=$(resolvectl status | grep "DNS Servers" | head -n1 | awk '{print $3}' 2>/dev/null)
+            if [[ "$resolved_dns" == *"${DNS_SERVERS[0]}"* ]]; then
+                dns_configured=true
+                echo -e "${GREEN}DNS set via systemd-resolved${NC}"
+            else
+                echo -e "${RED}Failed to set DNS via systemd-resolved${NC}"
+            fi
         fi
     fi
-
+    
     # Method 3: Traditional resolv.conf
     if [ "$dns_configured" = false ]; then
         echo -e "${YELLOW}Configuring DNS via /etc/resolv.conf...${NC}"
@@ -298,13 +309,22 @@ EOL
 $(for dns in "${DNS_SERVERS[@]}"; do echo "nameserver $dns"; done)
 options rotate timeout:2 attempts:3
 EOL
-
+        
         # Make resolv.conf immutable
         chattr +i /etc/resolv.conf 2>/dev/null && \
         echo -e "${GREEN}resolv.conf made immutable${NC}" || \
         echo -e "${YELLOW}Warning: Could not make resolv.conf immutable${NC}"
+        
+        # Check if DNS was applied
+        local resolv_dns=$(grep -E '^nameserver' /etc/resolv.conf | awk '{print $2}' | head -n1)
+        if [[ "$resolv_dns" == "${DNS_SERVERS[0]}" ]]; then
+            dns_configured=true
+            echo -e "${GREEN}DNS set via resolv.conf${NC}"
+        else
+            echo -e "${RED}Failed to set DNS via resolv.conf${NC}"
+        fi
     fi
-
+    
     # Method 4: resolvconf utility
     if command -v resolvconf >/dev/null 2>&1; then
         echo -e "${YELLOW}Configuring DNS via resolvconf...${NC}"
@@ -312,8 +332,17 @@ EOL
 $(for dns in "${DNS_SERVERS[@]}"; do echo "nameserver $dns"; done)
 EOL
         resolvconf -u
+        
+        # Check if DNS was applied
+        local resolvconf_dns=$(grep -E '^nameserver' /etc/resolv.conf | awk '{print $2}' | head -n1)
+        if [[ "$resolvconf_dns" == "${DNS_SERVERS[0]}" ]]; then
+            dns_configured=true
+            echo -e "${GREEN}DNS set via resolvconf${NC}"
+        else
+            echo -e "${RED}Failed to set DNS via resolvconf${NC}"
+        fi
     fi
-
+    
     # Method 5: DHCP configuration
     if [ -f /etc/dhcp/dhclient.conf ]; then
         echo -e "${YELLOW}Configuring DHCP to prevent DNS overwrites...${NC}"
@@ -323,9 +352,14 @@ EOL
         
         # Add new supersede line
         echo "supersede domain-name-servers ${DNS_SERVERS[*]};" >> /etc/dhcp/dhclient.conf
+        
+        # Restart network interface to apply DHCP changes
+        ifdown "$NETWORK_INTERFACE" 2>/dev/null && ifup "$NETWORK_INTERFACE" 2>/dev/null || \
+        nmcli con down "$connection_name" 2>/dev/null && nmcli con up "$connection_name" 2>/dev/null || \
+        ip link set "$NETWORK_INTERFACE" down && ip link set "$NETWORK_INTERFACE" up
     fi
-
-    # Method 6: Disable NetworkManager DNS management
+    
+    # Method 6: Disable NetworkManager DNS management if we used another method
     if [ -d /etc/NetworkManager/conf.d ] && [ "$dns_configured" = true ]; then
         cat > /etc/NetworkManager/conf.d/90-dns-none.conf <<EOL
 [main]
@@ -334,7 +368,7 @@ rc-manager=resolvconf
 EOL
         systemctl restart NetworkManager 2>/dev/null || true
     fi
-
+    
     CURRENT_DNS="${DNS_SERVERS[*]}"
     save_config
     
@@ -342,6 +376,7 @@ EOL
     echo -e "${YELLOW}Verifying DNS configuration...${NC}"
     sleep 3
     
+    # Get current DNS from resolv.conf
     local current_dns=$(grep -E '^nameserver' /etc/resolv.conf 2>/dev/null | awk '{print $2}' | tr '\n' ' ')
     echo -e "${GREEN}Current DNS in resolv.conf: $current_dns${NC}"
     
@@ -355,10 +390,31 @@ EOL
             echo -e "${GREEN}✓ Alternative DNS server works${NC}"
         else
             echo -e "${RED}✗ All DNS servers failed${NC}"
+            echo -e "${YELLOW}Attempting to fix DNS configuration...${NC}"
+            
+            # Try to fix DNS configuration
+            chattr -i /etc/resolv.conf 2>/dev/null || true
+            cat > /etc/resolv.conf <<EOL
+# Generated by $SCRIPT_NAME
+$(for dns in "${DNS_SERVERS[@]}"; do echo "nameserver $dns"; done)
+options rotate timeout:2 attempts:3
+EOL
+            chattr +i /etc/resolv.conf 2>/dev/null || true
+            
+            # Test again
+            if timeout 5 dig +short google.com @${DNS_SERVERS[0]} >/dev/null 2>&1; then
+                echo -e "${GREEN}✓ DNS resolution test successful after fix${NC}"
+            else
+                echo -e "${RED}✗ DNS resolution still failing${NC}"
+            fi
         fi
     fi
-
-    echo -e "${GREEN}DNS configuration completed successfully!${NC}"
+    
+    if [ "$dns_configured" = true ]; then
+        echo -e "${GREEN}DNS configuration completed successfully!${NC}"
+    else
+        echo -e "${RED}Failed to configure DNS properly!${NC}"
+    fi
 }
 
 # Install BBR
@@ -369,12 +425,11 @@ install_bbr() {
         echo -e "${RED}Kernel version $kernel_version does not support BBR! Minimum required: 4.9${NC}"
         return 1
     fi
-
+    
     echo -e "${YELLOW}Installing and configuring BBR...${NC}"
-
+    
     # Apply BBR settings
     cat >> /etc/sysctl.conf <<EOL
-
 # BBR Optimization - Added by $SCRIPT_NAME
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
@@ -389,19 +444,19 @@ net.core.netdev_max_backlog=16384
 net.ipv4.tcp_slow_start_after_idle=0
 net.ipv4.tcp_mtu_probing=1
 EOL
-
+    
     # Apply sysctl settings
     if sysctl -p >/dev/null 2>&1; then
         echo -e "${GREEN}Sysctl settings applied successfully${NC}"
     else
         echo -e "${RED}Failed to apply some sysctl settings${NC}"
     fi
-
+    
     # Set optimized MTU and DNS
     configure_mtu 1420
     DNS_SERVERS=("1.1.1.1" "1.0.0.1")
     update_dns
-
+    
     # Verify BBR
     local current_cc=$(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | awk '{print $3}')
     if [[ "$current_cc" == "bbr" ]]; then
@@ -640,7 +695,7 @@ manage_tunnel() {
     manage_tunnel
 }
 
-# Reset Network Settings
+# Reset Network Settings - FIXED
 reset_network() {
     echo -e "${YELLOW}Resetting network settings...${NC}"
     
@@ -648,7 +703,7 @@ reset_network() {
     ip link set dev "$NETWORK_INTERFACE" mtu 1500 2>/dev/null
     echo "1500" > "/sys/class/net/$NETWORK_INTERFACE/mtu" 2>/dev/null
     CURRENT_MTU=1500
-
+    
     # Reset DNS - Multiple methods
     local connection_name=""
     
@@ -664,33 +719,44 @@ reset_network() {
             nmcli con up "$connection_name" 2>/dev/null
         fi
     fi
-
+    
     # systemd-resolved
     if systemctl is-active systemd-resolved >/dev/null 2>&1; then
-        systemctl stop systemd-resolved
-        systemctl disable systemd-resolved 2>/dev/null
+        # Reset resolved.conf to default
+        cat > /etc/systemd/resolved.conf <<EOL
+[Resolve]
+#DNS=
+#Domains=
+#DNSOverTLS=no
+#DNSSEC=no
+Cache=yes
+DNSStubListener=yes
+EOL
+        systemctl restart systemd-resolved
+        resolvectl flush-caches
     fi
-
+    
     # Traditional resolv.conf
     chattr -i /etc/resolv.conf 2>/dev/null || true
     cat > /etc/resolv.conf <<EOL
+# Generated by $SCRIPT_NAME
 nameserver 1.1.1.1
 nameserver 1.0.0.1
 options rotate
 EOL
-
+    
     # Remove NetworkManager DNS override
     rm -f /etc/NetworkManager/conf.d/90-dns-none.conf 2>/dev/null
     systemctl restart NetworkManager 2>/dev/null || true
-
+    
     # Remove DHCP override
     if [ -f /etc/dhcp/dhclient.conf ]; then
         sed -i '/supersede domain-name-servers/d' /etc/dhcp/dhclient.conf
     fi
-
+    
     CURRENT_DNS="1.1.1.1 1.0.0.1"
     save_config
-
+    
     echo -e "${GREEN}Network settings reset to default!${NC}"
 }
 
@@ -699,20 +765,20 @@ reset_all() {
     echo -e "${YELLOW}Resetting ALL changes...${NC}"
     
     reset_network
-
+    
     # Reset ICMP
     iptables -D INPUT -p icmp --icmp-type echo-request -j DROP 2>/dev/null
-
+    
     # Reset IPv6
     sysctl -w net.ipv6.conf.all.disable_ipv6=0 >/dev/null
     sysctl -w net.ipv6.conf.default.disable_ipv6=0 >/dev/null
     sed -i '/net.ipv6.conf.all.disable_ipv6/d' /etc/sysctl.conf
     sed -i '/net.ipv6.conf.default.disable_ipv6/d' /etc/sysctl.conf
-
+    
     # Reset IPTables
     iptables -t nat -F
     iptables -F
-
+    
     # Remove BBR settings
     sed -i '/# BBR Optimization/d' /etc/sysctl.conf
     sed -i '/net.core.default_qdisc=fq/d' /etc/sysctl.conf
@@ -727,18 +793,18 @@ reset_all() {
     sed -i '/net.core.netdev_max_backlog/d' /etc/sysctl.conf
     sed -i '/net.ipv4.tcp_slow_start_after_idle/d' /etc/sysctl.conf
     sed -i '/net.ipv4.tcp_mtu_probing/d' /etc/sysctl.conf
-
+    
     # Apply sysctl
     sysctl -p >/dev/null 2>&1
-
+    
     # Save iptables
     if command -v iptables-save >/dev/null 2>&1; then
         iptables-save > /etc/iptables/rules.v4 2>/dev/null
     fi
-
+    
     # Remove config file
     rm -f "$CONFIG_FILE" 2>/dev/null
-
+    
     echo -e "${GREEN}All changes have been completely reset!${NC}"
 }
 
