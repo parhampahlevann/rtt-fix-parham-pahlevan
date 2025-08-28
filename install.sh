@@ -2,7 +2,7 @@
 
 # Global Configuration
 SCRIPT_NAME="Ultimate Network Optimizer"
-SCRIPT_VERSION="8.1"
+SCRIPT_VERSION="8.2"
 AUTHOR="Parham Pahlevan"
 CONFIG_FILE="/etc/network_optimizer.conf"
 LOG_FILE="/var/log/network_optimizer.log"
@@ -185,7 +185,7 @@ configure_mtu() {
     return 0
 }
 
-# Configure DNS - Fixed Version
+# Configure DNS - Fixed Version for edns interface
 configure_dns() {
     echo -e "\n${YELLOW}Manual DNS Configuration${NC}"
     echo -e "${GREEN}Please enter DNS servers (space separated)${NC}"
@@ -237,6 +237,22 @@ configure_dns() {
         for dns in "${valid_dns_servers[@]}"; do
             echo "nameserver $dns" >> /etc/resolv.conf.head
         done
+    fi
+    
+    # Special handling for edns interface
+    if [[ "$NETWORK_INTERFACE" == *"edns"* ]]; then
+        echo -e "${YELLOW}Detected edns interface - applying special configuration...${NC}"
+        
+        # Create or update edns-specific configuration
+        if [ -d /etc/edns ]; then
+            echo "nameserver ${valid_dns_servers[0]}" > /etc/edns/resolv.conf
+            [ ${#valid_dns_servers[@]} -gt 1 ] && echo "nameserver ${valid_dns_servers[1]}" >> /etc/edns/resolv.conf
+        fi
+        
+        # Try to restart edns service if exists
+        if systemctl list-unit-files | grep -q edns; then
+            systemctl restart edns 2>/dev/null || true
+        fi
     fi
     
     # Try NetworkManager method
@@ -335,6 +351,20 @@ nameserver 8.8.8.8
 nameserver 8.8.4.4
 EOL
     
+    # Special handling for edns interface
+    if [[ "$NETWORK_INTERFACE" == *"edns"* ]]; then
+        echo -e "${YELLOW}Resetting edns interface DNS...${NC}"
+        if [ -f /etc/edns/resolv.conf ]; then
+            cat > /etc/edns/resolv.conf <<EOL
+nameserver 8.8.8.8
+nameserver 8.8.4.4
+EOL
+        fi
+        if systemctl list-unit-files | grep -q edns; then
+            systemctl restart edns 2>/dev/null || true
+        fi
+    fi
+    
     # Reset NetworkManager
     if command -v nmcli >/dev/null 2>&1; then
         local con_name=$(nmcli -t -f DEVICE,CONNECTION dev show "$NETWORK_INTERFACE" 2>/dev/null | cut -d: -f2)
@@ -391,6 +421,12 @@ show_dns() {
     if command -v nmcli >/dev/null 2>&1; then
         echo -e "\n${YELLOW}NetworkManager DNS:${NC}"
         nmcli dev show 2>/dev/null | grep DNS || true
+    fi
+    
+    # Show edns-specific DNS if applicable
+    if [[ "$NETWORK_INTERFACE" == *"edns"* ]] && [ -f /etc/edns/resolv.conf ]; then
+        echo -e "\n${YELLOW}edns interface DNS:${NC}"
+        cat /etc/edns/resolv.conf
     fi
 }
 
