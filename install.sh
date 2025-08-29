@@ -2,7 +2,7 @@
 
 # Global Configuration
 SCRIPT_NAME="Ultimate Network Optimizer"
-SCRIPT_VERSION="8.5"  # Updated version with DNS fixes
+SCRIPT_VERSION="8.6"  # Fixed DNS configuration issues
 AUTHOR="Parham Pahlevan"
 CONFIG_FILE="/etc/network_optimizer.conf"
 LOG_FILE="/var/log/network_optimizer.log"
@@ -31,6 +31,7 @@ save_config() {
 # Network Optimizer Configuration
 MTU=$CURRENT_MTU
 DNS_SERVERS=(${DNS_SERVERS[@]})
+NETWORK_INTERFACE=$NETWORK_INTERFACE
 EOL
 }
 
@@ -186,14 +187,17 @@ configure_mtu() {
     return 0
 }
 
-# Safe DNS configuration - only modify resolv.conf and main interface
-configure_dns_safe() {
+# Update resolv.conf with new DNS servers
+update_resolv_conf() {
     local dns_servers=("$@")
     
-    echo -e "${YELLOW}Configuring DNS servers safely...${NC}"
+    echo -e "${YELLOW}Updating /etc/resolv.conf...${NC}"
     
-    # Backup current resolv.conf
-    cp /etc/resolv.conf /etc/resolv.conf.backup.$(date +%Y%m%d_%H%M%S) 2>/dev/null || true
+    # Remove immutable attribute if set
+    chattr -i /etc/resolv.conf 2>/dev/null || true
+    
+    # Backup existing resolv.conf
+    cp /etc/resolv.conf /etc/resolv.conf.backup."$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
     
     # Create new resolv.conf
     cat > /etc/resolv.conf <<EOL
@@ -215,7 +219,19 @@ EOL
     # Make file immutable to prevent changes by other services
     chattr +i /etc/resolv.conf 2>/dev/null || true
     
-    # Only configure the main network interface, not all interfaces
+    echo -e "${GREEN}/etc/resolv.conf updated successfully!${NC}"
+}
+
+# Safe DNS configuration for main interface only
+configure_dns_safe() {
+    local dns_servers=("$@")
+    
+    echo -e "${YELLOW}Configuring DNS safely for main interface only...${NC}"
+    
+    # Update resolv.conf
+    update_resolv_conf "${dns_servers[@]}"
+    
+    # Only configure the main network interface
     if command -v nmcli >/dev/null 2>&1 && systemctl is-active --quiet NetworkManager; then
         local con_name=$(nmcli -t -f DEVICE,CONNECTION dev show "$NETWORK_INTERFACE" 2>/dev/null | cut -d: -f2)
         if [ -n "$con_name" ]; then
@@ -227,7 +243,7 @@ EOL
         fi
     fi
     
-    echo -e "${GREEN}DNS configured safely!${NC}"
+    echo -e "${GREEN}DNS configured safely for main interface!${NC}"
     return 0
 }
 
