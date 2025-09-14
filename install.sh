@@ -2,7 +2,7 @@
 
 # Global Configuration
 SCRIPT_NAME="Ultimate Network Optimizer"
-SCRIPT_VERSION="8.6"  # Fixed DNS configuration issues
+SCRIPT_VERSION="8.7"  # Fixed DNS configuration issues
 AUTHOR="Parham Pahlevan"
 CONFIG_FILE="/etc/network_optimizer.conf"
 LOG_FILE="/var/log/network_optimizer.log"
@@ -11,6 +11,10 @@ DEFAULT_MTU=1420
 CURRENT_MTU=$(cat /sys/class/net/$NETWORK_INTERFACE/mtu 2>/dev/null || echo $DEFAULT_MTU)
 DNS_SERVERS=("1.1.1.1" "1.0.0.1")
 CURRENT_DNS=$(grep nameserver /etc/resolv.conf 2>/dev/null | awk '{print $2}' | tr '\n' ' ')
+
+# DNS Services Management
+DNS_SERVICES=( "systemd-resolved" "resolvconf" "dnsmasq" "unbound" "bind9" "named" "NetworkManager" )
+declare -A DETECTED_SERVICES_STATUS
 
 # Initialize logging
 mkdir -p "$(dirname "$LOG_FILE")"
@@ -24,6 +28,11 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 BOLD='\033[1m'
+
+# Helper Functions
+print_separator() { 
+    echo "-----------------------------------------------------" 
+}
 
 # Save Configuration
 save_config() {
@@ -47,9 +56,9 @@ load_config() {
 # Header Display
 show_header() {
     clear
-    echo -e "${BLUE}${BOLD}╔════════════════════════════════════════════════╗"
-    echo -e "║   ${SCRIPT_NAME} ${SCRIPT_VERSION} - ${AUTHOR}         ║"
-    echo -e "╚════════════════════════════════════════════════╝${NC}"
+    echo -e "${BLUE}${BOLD}====================================================="
+    echo -e "   ${SCRIPT_NAME} ${SCRIPT_VERSION} - ${AUTHOR}"
+    echo -e "=====================================================${NC}"
     echo -e "${YELLOW}Interface: ${BOLD}$NETWORK_INTERFACE${NC}"
     echo -e "${YELLOW}Current MTU: ${BOLD}$CURRENT_MTU${NC}"
     echo -e "${YELLOW}Current DNS: ${BOLD}$CURRENT_DNS${NC}"
@@ -130,10 +139,16 @@ ping_mtu() {
     fi
 }
 
-# Universal MTU Configuration
+# Universal MTU Configuration - FIXED
 configure_mtu() {
     local new_mtu=$1
     local old_mtu=$(cat /sys/class/net/$NETWORK_INTERFACE/mtu 2>/dev/null || echo $DEFAULT_MTU)
+
+    # Validate MTU
+    if [[ ! "$new_mtu" =~ ^[0-9]+$ ]] || [ "$new_mtu" -lt 576 ] || [ "$new_mtu" -gt 9000 ]; then
+        echo -e "${RED}Invalid MTU value! Must be between 576 and 9000.${NC}"
+        return 1
+    fi
 
     # Set temporary MTU
     if ! ip link set dev "$NETWORK_INTERFACE" mtu "$new_mtu"; then
@@ -149,26 +164,45 @@ configure_mtu() {
     fi
 
     # Apply permanent configuration
-    if [[ -d /etc/netplan ]]; then
+    local config_applied=false
+    
+    # Netplan (Ubuntu)
+    if [[ -d /etc/netplan ]] && command -v netplan >/dev/null 2>&1; then
         local netplan_file=$(ls /etc/netplan/*.yaml 2>/dev/null | head -n1)
         if [ -f "$netplan_file" ]; then
             cp "$netplan_file" "$netplan_file.backup.$(date +%Y%m%d_%H%M%S)"
             if grep -q "mtu:" "$netplan_file"; then
                 sed -i "s/mtu:.*/mtu: $new_mtu/" "$netplan_file"
             else
-                sed -i "/$NETWORK_INTERFACE:/a\      mtu: $new_mtu" "$netplan_file"
+                # Find the right place to insert MTU
+                if grep -A 10 "$NETWORK_INTERFACE:" "$netplan_file" | grep -q "dhcp4:"; then
+                    sed -i "/$NETWORK_INTERFACE:/,/dhcp4:/{/dhcp4:/i\      mtu: $new_mtu" "$netplan_file"
+                else
+                    sed -i "/$NETWORK_INTERFACE:/a\      mtu: $new_mtu" "$netplan_file"
+                fi
             fi
-            netplan apply >/dev/null 2>&1
+            if netplan apply >/dev/null 2>&1; then
+                config_applied=true
+                echo -e "${GREEN}MTU set via Netplan${NC}"
+            fi
         fi
-    elif [[ -f /etc/network/interfaces ]]; then
-        cp /etc/network/interfaces /etc/network/interfaces.backup.$(date +%Y%m%d_%H%M%S)
-        if grep -q "mtu" /etc/network/interfaces; then
-            sed -i "s/mtu.*/mtu $new_mtu/" /etc/network/interfaces
-        else
-            sed -i "/iface $NETWORK_INTERFACE inet/a\    mtu $new_mtu" /etc/network/interfaces
+    fi
+
+    # NetworkManager
+    if [ "$config_applied" = false ] && command -v nmcli >/dev/null 2>&1; then
+        local con_name=$(nmcli -t -f DEVICE,CONNECTION dev show "$NETWORK_INTERFACE" 2>/dev/null | cut -d: -f2)
+        if [ -n "$con_name" ]; then
+            nmcli con mod "$con_name" 802-3-ethernet.mtu $new_mtu 2>/dev/null || \
+            nmcli con mod "$con_name" wifi.mtu $new_mtu 2>/dev/null
+            nmcli con down "$con_name" 2>/dev/null
+            nmcli con up "$con_name" 2>/dev/null
+            config_applied=true
+            echo -e "${GREEN}MTU set via NetworkManager${NC}"
         fi
-        systemctl restart networking >/dev/null 2>&1 || true
-    elif [[ -d /etc/sysconfig/network-scripts ]]; then
+    fi
+
+    # Sysconfig (RedHat/CentOS)
+    if [ "$config_applied" = false ] && [[ -d /etc/sysconfig/network-scripts ]]; then
         local ifcfg_file="/etc/sysconfig/network-scripts/ifcfg-$NETWORK_INTERFACE"
         if [ -f "$ifcfg_file" ]; then
             cp "$ifcfg_file" "$ifcfg_file.backup.$(date +%Y%m%d_%H%M%S)"
@@ -177,14 +211,183 @@ configure_mtu() {
             else
                 echo "MTU=$new_mtu" >> "$ifcfg_file"
             fi
-            systemctl restart network >/dev/null 2>&1 || true
+            if systemctl restart network >/dev/null 2>&1; then
+                config_applied=true
+                echo -e "${GREEN}MTU set via sysconfig${NC}"
+            fi
         fi
+    fi
+
+    # Interfaces (Debian)
+    if [ "$config_applied" = false ] && [[ -f /etc/network/interfaces ]]; then
+        cp /etc/network/interfaces /etc/network/interfaces.backup.$(date +%Y%m%d_%H%M%S)
+        if grep -q "mtu" /etc/network/interfaces; then
+            sed -i "s/mtu.*/mtu $new_mtu/" /etc/network/interfaces
+        else
+            sed -i "/iface $NETWORK_INTERFACE inet/a\    mtu $new_mtu" /etc/network/interfaces
+        fi
+        if systemctl restart networking >/dev/null 2>&1; then
+            config_applied=true
+            echo -e "${GREEN}MTU set via interfaces file${NC}"
+        fi
+    fi
+
+    # Fallback: systemd networkd
+    if [ "$config_applied" = false ] && command -v networkctl >/dev/null 2>&1; then
+        local networkd_dir="/etc/systemd/network"
+        if [ -d "$networkd_dir" ]; then
+            local networkd_file=$(find "$networkd_dir" -name "*.network" | head -n1)
+            if [ -f "$networkd_file" ]; then
+                cp "$networkd_file" "$networkd_file.backup.$(date +%Y%m%d_%H%M%S)"
+                if grep -q "MTU=" "$networkd_file"; then
+                    sed -i "s/MTU=.*/MTU=$new_mtu/" "$networkd_file"
+                else
+                    echo -e "\n[Link]\nMTU=$new_mtu" >> "$networkd_file"
+                fi
+                systemctl restart systemd-networkd >/dev/null 2>&1
+                config_applied=true
+                echo -e "${GREEN}MTU set via systemd-networkd${NC}"
+            fi
+        fi
+    fi
+
+    if [ "$config_applied" = false ]; then
+        echo -e "${YELLOW}Warning: Could not set permanent MTU. Only temporary MTU applied.${NC}"
+        echo -e "${YELLOW}You may need to configure MTU manually for your distribution.${NC}"
     fi
 
     CURRENT_MTU=$new_mtu
     save_config
     echo -e "${GREEN}MTU successfully set to $new_mtu${NC}"
     return 0
+}
+
+# DNS Services Detection
+detect_dns_services() {
+    echo "Detecting DNS-related services..."
+    print_separator
+    
+    for svc in "${DNS_SERVICES[@]}"; do
+        if systemctl is-active --quiet "$svc" 2>/dev/null; then
+            DETECTED_SERVICES_STATUS["$svc"]="active"
+            echo -e "${YELLOW}Detected: $svc (active)${NC}"
+        elif systemctl is-enabled --quiet "$svc" 2>/dev/null; then
+            DETECTED_SERVICES_STATUS["$svc"]="enabled"
+            echo -e "${YELLOW}Detected: $svc (enabled)${NC}"
+        elif command -v "$svc" >/dev/null 2>&1; then
+            DETECTED_SERVICES_STATUS["$svc"]="installed"
+            echo -e "${YELLOW}Detected: $svc (installed)${NC}"
+        fi
+    done
+}
+
+# Disable DNS Service
+disable_service() {
+    local svc="$1"
+    echo "Disabling $svc..."
+    
+    if systemctl stop "$svc" 2>/dev/null; then
+        echo -e "${GREEN}Stopped $svc${NC}"
+    fi
+    
+    if systemctl disable "$svc" 2>/dev/null; then
+        echo -e "${GREEN}Disabled $svc${NC}"
+    fi
+    
+    if systemctl mask "$svc" 2>/dev/null; then
+        echo -e "${GREEN}Masked $svc${NC}"
+    fi
+}
+
+# Remove DNS Service
+remove_service() {
+    local svc="$1"
+    echo "Removing $svc..."
+    
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get remove --purge -y "$svc" 2>/dev/null && \
+        echo -e "${GREEN}Removed $svc${NC}"
+    elif command -v yum >/dev/null 2>&1; then
+        yum remove -y "$svc" 2>/dev/null && \
+        echo -e "${GREEN}Removed $svc${NC}"
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf remove -y "$svc" 2>/dev/null && \
+        echo -e "${GREEN}Removed $svc${NC}"
+    else
+        echo -e "${YELLOW}Package manager not found, cannot remove $svc${NC}"
+    fi
+}
+
+# Set resolv.conf
+set_resolv_conf() {
+    echo ""
+    print_separator
+    echo "Setting default DNS resolvers..."
+    
+    # Remove immutable attribute if set
+    chattr -i /etc/resolv.conf 2>/dev/null || true
+    
+    # Create new resolv.conf
+    cat > /etc/resolv.conf <<EOF
+# Generated by $SCRIPT_NAME
+# Date: $(date)
+# Do not edit this file manually
+
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+EOF
+    
+    # Make file immutable to prevent changes by other services
+    chattr +i /etc/resolv.conf 2>/dev/null || true
+    
+    echo -e "${GREEN}/etc/resolv.conf updated successfully!${NC}"
+}
+
+# DNS Services Management Menu
+manage_dns_services() {
+    detect_dns_services
+    
+    if [ ${#DETECTED_SERVICES_STATUS[@]} -eq 0 ]; then
+        echo -e "${GREEN}No DNS services detected that need management.${NC}"
+        return 0
+    fi
+    
+    while true; do
+        echo ""
+        print_separator
+        echo "Choose an action:"
+        echo "1) Disable detected DNS services"
+        echo "2) Disable and remove detected DNS services"
+        echo "3) Back to Main Menu"
+        
+        read -rp "Enter your choice [1-3]: " choice
+        
+        case $choice in
+            1)
+                for svc in "${!DETECTED_SERVICES_STATUS[@]}"; do
+                    disable_service "$svc"
+                done
+                set_resolv_conf
+                echo -e "${GREEN}All detected DNS services disabled!${NC}"
+                ;;
+            2)
+                for svc in "${!DETECTED_SERVICES_STATUS[@]}"; do
+                    disable_service "$svc"
+                    remove_service "$svc"
+                done
+                set_resolv_conf
+                echo -e "${GREEN}All detected DNS services removed!${NC}"
+                ;;
+            3)
+                return
+                ;;
+            *)
+                echo -e "${RED}Invalid option!${NC}"
+                ;;
+        esac
+        
+        read -p "Press [Enter] to continue..."
+    done
 }
 
 # Update resolv.conf with new DNS servers
@@ -227,6 +430,9 @@ configure_dns_safe() {
     local dns_servers=("$@")
     
     echo -e "${YELLOW}Configuring DNS safely for main interface only...${NC}"
+    
+    # First manage DNS services
+    manage_dns_services
     
     # Update resolv.conf
     update_resolv_conf "${dns_servers[@]}"
@@ -301,7 +507,7 @@ configure_dns() {
                 echo -e "${GREEN}✓ DNS test successful for $dns${NC}"
                 test_passed=1
             else
-                echo -e "${YELLOW}⚠ DNS test failed for $dns${NC}"
+                echo -e "${YELLOW}✗ DNS test failed for $dns${NC}"
             fi
         done
     elif command -v nslookup >/dev/null 2>&1; then
@@ -310,11 +516,11 @@ configure_dns() {
                 echo -e "${GREEN}✓ DNS test successful for $dns${NC}"
                 test_passed=1
             else
-                echo -e "${YELLOW}⚠ DNS test failed for $dns${NC}"
+                echo -e "${YELLOW}✗ DNS test failed for $dns${NC}"
             fi
         done
     else
-        echo -e "${YELLOW}⚠ DNS testing tools not available${NC}"
+        echo -e "${YELLOW}✗ DNS testing tools not available${NC}"
         test_passed=1  # Assume success if no tools available
     fi
     
@@ -322,7 +528,7 @@ configure_dns() {
         echo -e "${GREEN}DNS configuration completed successfully!${NC}"
         echo -e "${YELLOW}Configured DNS servers: ${BOLD}${valid_dns_servers[*]}${NC}"
     else
-        echo -e "${YELLOW}⚠ DNS configuration applied but tests failed.${NC}"
+        echo -e "${YELLOW}✗ DNS configuration applied but tests failed.${NC}"
         echo -e "${YELLOW}Server will continue to boot normally.${NC}"
     fi
     
