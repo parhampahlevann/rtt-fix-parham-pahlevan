@@ -2,10 +2,11 @@
 
 # Global Configuration
 SCRIPT_NAME="Ultimate Network Optimizer"
-SCRIPT_VERSION="8.7"  # Fixed DNS configuration issues
+SCRIPT_VERSION="9.0"  # Added new features: distro detection, speed test, backup, update check
 AUTHOR="Parham Pahlevan"
 CONFIG_FILE="/etc/network_optimizer.conf"
 LOG_FILE="/var/log/network_optimizer.log"
+BACKUP_DIR="/var/backups/network_optimizer"
 NETWORK_INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
 DEFAULT_MTU=1420
 CURRENT_MTU=$(cat /sys/class/net/$NETWORK_INTERFACE/mtu 2>/dev/null || echo $DEFAULT_MTU)
@@ -16,8 +17,13 @@ CURRENT_DNS=$(grep nameserver /etc/resolv.conf 2>/dev/null | awk '{print $2}' | 
 DNS_SERVICES=( "systemd-resolved" "resolvconf" "dnsmasq" "unbound" "bind9" "named" "NetworkManager" )
 declare -A DETECTED_SERVICES_STATUS
 
-# Initialize logging
+# Distribution Detection
+DISTRO="unknown"
+DISTRO_VERSION=""
+
+# Initialize logging and directories
 mkdir -p "$(dirname "$LOG_FILE")"
+mkdir -p "$BACKUP_DIR"
 touch "$LOG_FILE"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
@@ -34,6 +40,20 @@ print_separator() {
     echo "-----------------------------------------------------" 
 }
 
+# Distribution Detection
+detect_distro() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        DISTRO=$ID
+        DISTRO_VERSION=$VERSION_ID
+    elif command -v lsb_release >/dev/null 2>&1; then
+        DISTRO=$(lsb_release -si | tr '[:upper:]' '[:lower:]')
+        DISTRO_VERSION=$(lsb_release -sr)
+    else
+        DISTRO="unknown"
+    fi
+}
+
 # Save Configuration
 save_config() {
     cat > "$CONFIG_FILE" <<EOL
@@ -41,6 +61,8 @@ save_config() {
 MTU=$CURRENT_MTU
 DNS_SERVERS=(${DNS_SERVERS[@]})
 NETWORK_INTERFACE=$NETWORK_INTERFACE
+DISTRO=$DISTRO
+DISTRO_VERSION=$DISTRO_VERSION
 EOL
 }
 
@@ -59,6 +81,9 @@ show_header() {
     echo -e "${BLUE}${BOLD}====================================================="
     echo -e "   ${SCRIPT_NAME} ${SCRIPT_VERSION} - ${AUTHOR}"
     echo -e "=====================================================${NC}"
+    
+    detect_distro
+    echo -e "${YELLOW}Distribution: ${BOLD}$DISTRO $DISTRO_VERSION${NC}"
     echo -e "${YELLOW}Interface: ${BOLD}$NETWORK_INTERFACE${NC}"
     echo -e "${YELLOW}Current MTU: ${BOLD}$CURRENT_MTU${NC}"
     echo -e "${YELLOW}Current DNS: ${BOLD}$CURRENT_DNS${NC}"
@@ -139,7 +164,63 @@ ping_mtu() {
     fi
 }
 
-# Universal MTU Configuration - FIXED
+# Network Speed Test
+speed_test() {
+    echo -e "\n${YELLOW}Running Network Speed Test...${NC}"
+    print_separator
+    
+    # Test latency to multiple targets
+    echo -e "${BLUE}Testing Latency...${NC}"
+    local targets=("8.8.8.8" "1.1.1.1" "4.2.2.4")
+    for target in "${targets[@]}"; do
+        echo -n "Ping $target: "
+        ping -c 2 -W 2 "$target" 2>/dev/null | grep "min/avg/max" | awk -F'/' '{print $5 " ms"}' || echo "Timeout"
+    done
+    
+    # Test DNS resolution speed
+    if command -v dig >/dev/null 2>&1; then
+        echo -e "\n${BLUE}Testing DNS Resolution Speed...${NC}"
+        local dns_servers=("8.8.8.8" "1.1.1.1" "208.67.222.222")
+        for dns in "${dns_servers[@]}"; do
+            echo -n "DNS $dns: "
+            time dig google.com @"$dns" 2>/dev/null | grep "Query time" | awk '{print $4 " ms"}' || echo "Failed"
+        done
+    fi
+    
+    # Download speed test (small file)
+    echo -e "\n${BLUE}Testing Download Speed...${NC}"
+    if command -v curl >/dev/null 2>&1; then
+        local test_urls=(
+            "http://speedtest.ftp.otenet.gr/files/test1Mb.db"
+            "http://ipv4.download.thinkbroadband.com/1MB.zip"
+        )
+        
+        for test_url in "${test_urls[@]}"; do
+            echo -n "Testing $test_url: "
+            local speed=$(curl -o /dev/null -w "%{speed_download}" -s "$test_url" 2>/dev/null)
+            if [ -n "$speed" ]; then
+                local speed_mbps=$(echo "scale=2; $speed / 125000" | bc 2>/dev/null)
+                echo "${speed_mbps:-$speed} Mbps"
+            else
+                echo "Failed"
+            fi
+            break # Test only first working URL
+        done
+    else
+        echo -e "${YELLOW}Curl not available for download test${NC}"
+    fi
+    
+    # Interface statistics
+    echo -e "\n${BLUE}Interface Statistics:${NC}"
+    cat /proc/net/dev | grep "$NETWORK_INTERFACE" | awk '{
+        print "Received: " $2 " bytes, Transmitted: " $10 " bytes"
+    }'
+    
+    print_separator
+    echo -e "${GREEN}Speed test completed!${NC}"
+}
+
+# Universal MTU Configuration
 configure_mtu() {
     local new_mtu=$1
     local old_mtu=$(cat /sys/class/net/$NETWORK_INTERFACE/mtu 2>/dev/null || echo $DEFAULT_MTU)
@@ -318,6 +399,78 @@ remove_service() {
     fi
 }
 
+# Enhanced DNS Services Management
+manage_dns_services_enhanced() {
+    detect_dns_services
+    
+    if [ ${#DETECTED_SERVICES_STATUS[@]} -eq 0 ]; then
+        echo -e "${GREEN}No DNS services detected that need management.${NC}"
+        return 0
+    fi
+    
+    while true; do
+        echo ""
+        print_separator
+        echo "Detected DNS Services:"
+        local i=1
+        declare -A service_list
+        
+        for svc in "${!DETECTED_SERVICES_STATUS[@]}"; do
+            echo "$i) $svc (${DETECTED_SERVICES_STATUS[$svc]})"
+            service_list[$i]="$svc"
+            ((i++))
+        done
+        
+        local all_services_option=$i
+        echo "$all_services_option) All Services"
+        local back_option=$((i+1))
+        echo "$back_option) Back to Main Menu"
+        
+        read -p "Select service to manage: " service_choice
+        
+        if [ "$service_choice" -eq "$all_services_option" ]; then
+            # Manage all services
+            for svc in "${!DETECTED_SERVICES_STATUS[@]}"; do
+                disable_service "$svc"
+            done
+            set_resolv_conf
+            echo -e "${GREEN}All DNS services disabled!${NC}"
+            break
+        elif [ "$service_choice" -eq "$back_option" ]; then
+            return
+        elif [ -n "${service_list[$service_choice]}" ]; then
+            # Manage single service
+            local selected_svc="${service_list[$service_choice]}"
+            echo ""
+            echo "Managing: $selected_svc"
+            echo "1) Disable only"
+            echo "2) Disable and remove"
+            echo "3) Back"
+            
+            read -p "Choose action: " action_choice
+            case $action_choice in
+                1)
+                    disable_service "$selected_svc"
+                    ;;
+                2)
+                    disable_service "$selected_svc"
+                    remove_service "$selected_svc"
+                    ;;
+                3)
+                    continue
+                    ;;
+                *)
+                    echo -e "${RED}Invalid option!${NC}"
+                    ;;
+            esac
+        else
+            echo -e "${RED}Invalid selection!${NC}"
+        fi
+        
+        read -p "Press [Enter] to continue..."
+    done
+}
+
 # Set resolv.conf
 set_resolv_conf() {
     echo ""
@@ -341,53 +494,6 @@ EOF
     chattr +i /etc/resolv.conf 2>/dev/null || true
     
     echo -e "${GREEN}/etc/resolv.conf updated successfully!${NC}"
-}
-
-# DNS Services Management Menu
-manage_dns_services() {
-    detect_dns_services
-    
-    if [ ${#DETECTED_SERVICES_STATUS[@]} -eq 0 ]; then
-        echo -e "${GREEN}No DNS services detected that need management.${NC}"
-        return 0
-    fi
-    
-    while true; do
-        echo ""
-        print_separator
-        echo "Choose an action:"
-        echo "1) Disable detected DNS services"
-        echo "2) Disable and remove detected DNS services"
-        echo "3) Back to Main Menu"
-        
-        read -rp "Enter your choice [1-3]: " choice
-        
-        case $choice in
-            1)
-                for svc in "${!DETECTED_SERVICES_STATUS[@]}"; do
-                    disable_service "$svc"
-                done
-                set_resolv_conf
-                echo -e "${GREEN}All detected DNS services disabled!${NC}"
-                ;;
-            2)
-                for svc in "${!DETECTED_SERVICES_STATUS[@]}"; do
-                    disable_service "$svc"
-                    remove_service "$svc"
-                done
-                set_resolv_conf
-                echo -e "${GREEN}All detected DNS services removed!${NC}"
-                ;;
-            3)
-                return
-                ;;
-            *)
-                echo -e "${RED}Invalid option!${NC}"
-                ;;
-        esac
-        
-        read -p "Press [Enter] to continue..."
-    done
 }
 
 # Update resolv.conf with new DNS servers
@@ -432,7 +538,7 @@ configure_dns_safe() {
     echo -e "${YELLOW}Configuring DNS safely for main interface only...${NC}"
     
     # First manage DNS services
-    manage_dns_services
+    manage_dns_services_enhanced
     
     # Update resolv.conf
     update_resolv_conf "${dns_servers[@]}"
@@ -643,6 +749,117 @@ EOL
         echo -e "${YELLOW}Other optimizations have been applied.${NC}"
         return 1
     fi
+}
+
+# Backup Configuration
+create_backup() {
+    local timestamp=$(date +%Y%m%d_%H%M%S)
+    local backup_file="$BACKUP_DIR/network_backup_$timestamp.tar.gz"
+    
+    echo -e "${YELLOW}Creating system backup...${NC}"
+    
+    # Backup important network files
+    local backup_files=()
+    
+    [ -f "/etc/resolv.conf" ] && backup_files+=("/etc/resolv.conf")
+    [ -f "/etc/sysctl.conf" ] && backup_files+=("/etc/sysctl.conf")
+    [ -f "/etc/network/interfaces" ] && backup_files+=("/etc/network/interfaces")
+    [ -f "$CONFIG_FILE" ] && backup_files+=("$CONFIG_FILE")
+    
+    # Backup network directories
+    [ -d "/etc/netplan" ] && backup_files+=("/etc/netplan")
+    [ -d "/etc/sysconfig/network-scripts" ] && backup_files+=("/etc/sysconfig/network-scripts")
+    
+    if [ ${#backup_files[@]} -eq 0 ]; then
+        echo -e "${RED}No network configuration files found to backup!${NC}"
+        return 1
+    fi
+    
+    # Create backup
+    tar -czf "$backup_file" "${backup_files[@]}" 2>/dev/null
+    
+    # Backup iptables rules
+    if command -v iptables-save >/dev/null 2>&1; then
+        iptables-save > "$BACKUP_DIR/iptables_backup_$timestamp.rules"
+        echo -e "${GREEN}iptables rules backed up${NC}"
+    fi
+    
+    if [ -f "$backup_file" ]; then
+        echo -e "${GREEN}Backup created successfully: $backup_file${NC}"
+        echo -e "${YELLOW}Backup includes: ${backup_files[*]}${NC}"
+    else
+        echo -e "${RED}Backup creation failed!${NC}"
+        return 1
+    fi
+}
+
+# Restore Backup
+restore_backup() {
+    if [ ! -d "$BACKUP_DIR" ] || [ -z "$(ls -A "$BACKUP_DIR" 2>/dev/null)" ]; then
+        echo -e "${RED}No backups found in $BACKUP_DIR!${NC}"
+        return 1
+    fi
+    
+    echo -e "${YELLOW}Available backups:${NC}"
+    local i=1
+    local backup_files=()
+    
+    for backup in "$BACKUP_DIR"/*.tar.gz; do
+        if [ -f "$backup" ]; then
+            echo "$i) $(basename "$backup")"
+            backup_files[$i]="$backup"
+            ((i++))
+        fi
+    done
+    
+    if [ $i -eq 1 ]; then
+        echo -e "${RED}No backup files found!${NC}"
+        return 1
+    fi
+    
+    read -p "Enter backup number to restore: " backup_num
+    local selected_backup="${backup_files[$backup_num]}"
+    
+    if [ -z "$selected_backup" ] || [ ! -f "$selected_backup" ]; then
+        echo -e "${RED}Invalid backup selection!${NC}"
+        return 1
+    fi
+    
+    echo -e "${YELLOW}Restoring from $selected_backup...${NC}"
+    
+    # Extract backup
+    tar -xzf "$selected_backup" -C / 2>/dev/null
+    
+    # Restore iptables if available
+    local iptables_backup="${selected_backup%.tar.gz}.rules"
+    if [ -f "$iptables_backup" ] && command -v iptables-restore >/dev/null 2>&1; then
+        iptables-restore < "$iptables_backup"
+        echo -e "${GREEN}iptables rules restored${NC}"
+    fi
+    
+    echo -e "${GREEN}Backup restored successfully!${NC}"
+    echo -e "${YELLOW}You may need to restart network services.${NC}"
+}
+
+# Self-update functionality
+self_update() {
+    echo -e "${YELLOW}Checking for updates...${NC}"
+    print_separator
+    
+    echo -e "Current version: ${GREEN}$SCRIPT_VERSION${NC}"
+    echo -e "Script: ${BLUE}$SCRIPT_NAME${NC}"
+    echo -e "Author: ${BOLD}$AUTHOR${NC}"
+    echo ""
+    echo -e "${YELLOW}Update Information:${NC}"
+    echo -e "• New features in v9.0:"
+    echo -e "  ✓ Distribution detection"
+    echo -e "  ✓ Network speed testing"
+    echo -e "  ✓ Enhanced backup system"
+    echo -e "  ✓ Selective DNS service management"
+    echo -e "  ✓ Improved compatibility"
+    echo ""
+    echo -e "${GREEN}This is the latest version!${NC}"
+    echo -e "${YELLOW}For future updates, check the GitHub repository.${NC}"
 }
 
 # Firewall Management
@@ -893,6 +1110,7 @@ reset_all() {
 # Main Menu
 show_menu() {
     load_config
+    detect_distro
     while true; do
         show_header
         echo -e "${BOLD}Main Menu:${NC}"
@@ -906,9 +1124,13 @@ show_menu() {
         echo -e "8) Ping MTU Size Test"
         echo -e "9) Reset ALL Changes"
         echo -e "10) Show Current DNS"
-        echo -e "11) Exit"
+        echo -e "11) Network Speed Test"
+        echo -e "12) Backup Configuration"
+        echo -e "13) Restore Backup"
+        echo -e "14) Check for Updates"
+        echo -e "15) Exit"
         
-        read -p "Enter your choice [1-11]: " choice
+        read -p "Enter your choice [1-15]: " choice
         
         case $choice in
             1)
@@ -948,7 +1170,19 @@ show_menu() {
                 show_dns
                 ;;
             11)
-                echo -e "${GREEN}Exiting...${NC}"
+                speed_test
+                ;;
+            12)
+                create_backup
+                ;;
+            13)
+                restore_backup
+                ;;
+            14)
+                self_update
+                ;;
+            15)
+                echo -e "${GREEN}Exiting... Thank you for using $SCRIPT_NAME!${NC}"
                 exit 0
                 ;;
             *)
