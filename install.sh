@@ -2,7 +2,7 @@
 
 # Global Configuration
 SCRIPT_NAME="Ultimate Network Optimizer"
-SCRIPT_VERSION="9.0"  # Added new features: distro detection, speed test, backup, update check
+SCRIPT_VERSION="9.2"  # Enhanced BBR algorithm with advanced optimizations
 AUTHOR="Parham Pahlevan"
 CONFIG_FILE="/etc/network_optimizer.conf"
 LOG_FILE="/var/log/network_optimizer.log"
@@ -706,8 +706,11 @@ show_dns() {
     echo -e "${YELLOW}Configured DNS servers: ${BOLD}$CURRENT_DNS${NC}"
 }
 
-# Install BBR
+# Enhanced BBR Installation (ONLY BBR - No DNS/MTU changes)
 install_bbr() {
+    echo -e "${YELLOW}Installing and configuring BBR optimization...${NC}"
+    print_separator
+    
     # Check if BBR is already enabled
     local current_cc=$(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | awk '{print $3}')
     if [[ "$current_cc" == "bbr" ]]; then
@@ -715,38 +718,98 @@ install_bbr() {
         return 0
     fi
 
-    # Apply BBR settings
-    cat >> /etc/sysctl.conf <<EOL
+    echo -e "${BLUE}Applying advanced BBR optimizations...${NC}"
+    
+    # TCP Keepalive for connection stability
+    sysctl -w net.ipv4.tcp_keepalive_time=300
+    sysctl -w net.ipv4.tcp_keepalive_intvl=60
+    sysctl -w net.ipv4.tcp_keepalive_probes=10
 
-# BBR Optimization
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
-net.ipv4.tcp_fastopen=3
-net.ipv4.tcp_syncookies=1
-net.ipv4.tcp_tw_reuse=1
-net.ipv4.tcp_fin_timeout=30
-net.ipv4.ip_local_port_range=1024 65000
-net.ipv4.tcp_max_syn_backlog=8192
+    # Increase connection limits
+    sysctl -w net.core.somaxconn=65535
+    sysctl -w net.ipv4.tcp_max_syn_backlog=8192
+    sysctl -w net.core.netdev_max_backlog=5000
+    sysctl -w net.ipv4.tcp_max_tw_buckets=200000
+
+    # Enhance BBR for streaming and downloading
+    sysctl -w net.core.default_qdisc=fq_codel
+    if sysctl -w net.ipv4.tcp_congestion_control=bbr 2>/dev/null; then
+        echo -e "${GREEN}BBR successfully enabled.${NC}"
+    else
+        echo -e "${YELLOW}BBR not supported, attempting to enable BBRv2...${NC}"
+        modprobe tcp_bbr 2>/dev/null
+        sysctl -w net.ipv4.tcp_congestion_control=bbr 2>/dev/null
+    fi
+
+    # Additional settings for low latency and streaming
+    sysctl -w net.ipv4.tcp_low_latency=1
+    sysctl -w net.ipv4.tcp_window_scaling=1
+    sysctl -w net.ipv4.tcp_sack=1
+    sysctl -w net.ipv4.tcp_no_metrics_save=0
+    sysctl -w net.ipv4.tcp_ecn=1
+    sysctl -w net.ipv4.tcp_adv_win_scale=1
+    sysctl -w net.ipv4.tcp_moderate_rcvbuf=1
+
+    # Optimize TCP Fast Open
+    sysctl -w net.ipv4.tcp_fastopen=3
+
+    # Optimize MTU and MSS
+    sysctl -w net.ipv4.tcp_mtu_probing=1
+    sysctl -w net.ipv4.tcp_base_mss=1024
+
+    # Optimize TCP buffers
+    sysctl -w net.ipv4.tcp_rmem='4096 87380 8388608'
+    sysctl -w net.ipv4.tcp_wmem='4096 16384 8388608'
+    sysctl -w net.core.rmem_max=16777216
+    sysctl -w net.core.wmem_max=16777216
+
+    # Save settings to /etc/sysctl.conf
+    echo -e "${BLUE}Saving settings to /etc/sysctl.conf...${NC}"
+    
+    # Backup existing sysctl.conf
+    cp /etc/sysctl.conf /etc/sysctl.conf.backup."$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
+    
+    # Append BBR settings to sysctl.conf
+    cat <<EOT >> /etc/sysctl.conf
+
+# BBR Optimization - Added by $SCRIPT_NAME
+net.ipv4.tcp_keepalive_time=300
+net.ipv4.tcp_keepalive_intvl=60
+net.ipv4.tcp_keepalive_probes=10
 net.core.somaxconn=65535
-net.core.netdev_max_backlog=16384
-EOL
+net.ipv4.tcp_max_syn_backlog=8192
+net.core.netdev_max_backlog=5000
+net.ipv4.tcp_max_tw_buckets=200000
+net.core.default_qdisc=fq_codel
+net.ipv4.tcp_congestion_control=bbr
+net.ipv4.tcp_low_latency=1
+net.ipv4.tcp_window_scaling=1
+net.ipv4.tcp_sack=1
+net.ipv4.tcp_no_metrics_save=0
+net.ipv4.tcp_ecn=1
+net.ipv4.tcp_adv_win_scale=1
+net.ipv4.tcp_moderate_rcvbuf=1
+net.ipv4.tcp_fastopen=3
+net.ipv4.tcp_mtu_probing=1
+net.ipv4.tcp_base_mss=1024
+net.ipv4.tcp_rmem=4096 87380 8388608
+net.ipv4.tcp_wmem=4096 16384 8388608
+net.core.rmem_max=16777216
+net.core.wmem_max=16777216
+EOT
 
-    # Apply settings
+    # Apply settings permanently
     sysctl -p >/dev/null 2>&1
-
-    # Set default MTU and DNS
-    configure_mtu 1420
-    DNS_SERVERS=("1.1.1.1" "1.0.0.1")
-    configure_dns_safe "${DNS_SERVERS[@]}"
 
     # Verify BBR
     current_cc=$(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | awk '{print $3}')
     if [[ "$current_cc" == "bbr" ]]; then
-        echo -e "${GREEN}BBR successfully installed and configured${NC}"
+        echo -e "${GREEN}✓ BBR successfully installed and configured!${NC}"
+        echo -e "${YELLOW}Note: DNS and MTU settings remain unchanged.${NC}"
         return 0
     else
-        echo -e "${YELLOW}BBR not enabled. Your kernel may not support BBR.${NC}"
-        echo -e "${YELLOW}Other optimizations have been applied.${NC}"
+        echo -e "${YELLOW}⚠ BBR not enabled. Your kernel may not support BBR.${NC}"
+        echo -e "${YELLOW}Other TCP optimizations have been applied.${NC}"
         return 1
     fi
 }
@@ -851,12 +914,12 @@ self_update() {
     echo -e "Author: ${BOLD}$AUTHOR${NC}"
     echo ""
     echo -e "${YELLOW}Update Information:${NC}"
-    echo -e "• New features in v9.0:"
+    echo -e "• New features in v9.2:"
+    echo -e "  ✓ Enhanced BBR algorithm with advanced optimizations"
+    echo -e "  ✓ BBR install without changing DNS/MTU"
     echo -e "  ✓ Distribution detection"
     echo -e "  ✓ Network speed testing"
     echo -e "  ✓ Enhanced backup system"
-    echo -e "  ✓ Selective DNS service management"
-    echo -e "  ✓ Improved compatibility"
     echo ""
     echo -e "${GREEN}This is the latest version!${NC}"
     echo -e "${YELLOW}For future updates, check the GitHub repository.${NC}"
@@ -1088,16 +1151,7 @@ reset_all() {
     iptables -t nat -F 2>/dev/null
 
     # Remove BBR settings
-    sed -i '/net.core.default_qdisc=fq/d' /etc/sysctl.conf
-    sed -i '/net.ipv4.tcp_congestion_control=bbr/d' /etc/sysctl.conf
-    sed -i '/net.ipv4.tcp_fastopen=3/d' /etc/sysctl.conf
-    sed -i '/net.ipv4.tcp_syncookies=1/d' /etc/sysctl.conf
-    sed -i '/net.ipv4.tcp_tw_reuse=1/d' /etc/sysctl.conf
-    sed -i '/net.ipv4.tcp_fin_timeout=30/d' /etc/sysctl.conf
-    sed -i '/net.ipv4.ip_local_port_range=1024 65000/d' /etc/sysctl.conf
-    sed -i '/net.ipv4.tcp_max_syn_backlog=8192/d' /etc/sysctl.conf
-    sed -i '/net.core.somaxconn=65535/d' /etc/sysctl.conf
-    sed -i '/net.core.netdev_max_backlog=16384/d' /etc/sysctl.conf
+    sed -i '/# BBR Optimization - Added by $SCRIPT_NAME/,/net.core.wmem_max=16777216/d' /etc/sysctl.conf
     
     sysctl -p >/dev/null 2>&1
 
