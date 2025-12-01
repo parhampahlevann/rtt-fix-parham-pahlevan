@@ -25,7 +25,7 @@ DISTRO_VERSION=""
 mkdir -p "$(dirname "$LOG_FILE")"
 mkdir -p "$BACKUP_DIR"
 touch "$LOG_FILE"
-exec > >(while IFS= read -r line; do printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$line"; done | tee -a "$LOG_FILE") 2>&1
+exec > >(tee -a "$LOG_FILE") 2>&1
 
 # Color Codes
 RED='\033[0;31m'
@@ -57,17 +57,6 @@ check_requirements() {
     fi
 }
 
-# Cleanup function
-cleanup() {
-    echo -e "\n${YELLOW}Cleaning up...${NC}"
-    rm -f /tmp/network_optimizer_*.tmp 2>/dev/null
-    chmod 600 "$LOG_FILE" 2>/dev/null
-    echo -e "${GREEN}Cleanup completed!${NC}"
-}
-
-# Trap exit signals
-trap cleanup EXIT INT TERM
-
 # Confirm dangerous operations
 confirm_action() {
     local message="$1"
@@ -85,12 +74,6 @@ detect_distro() {
     elif command -v lsb_release >/dev/null 2>&1; then
         DISTRO=$(lsb_release -si | tr '[:upper:]' '[:lower:]')
         DISTRO_VERSION=$(lsb_release -sr)
-    elif [ -f /etc/arch-release ]; then
-        DISTRO="arch"
-        DISTRO_VERSION="rolling"
-    elif [ -f /etc/fedora-release ]; then
-        DISTRO="fedora"
-        DISTRO_VERSION=$(grep -o '[0-9]\+' /etc/fedora-release)
     else
         DISTRO="unknown"
     fi
@@ -132,9 +115,8 @@ show_header() {
 
     # Show BBR Status
     local bbr_status=$(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | awk '{print $3}')
-    local bbr_module=$(lsmod | grep -q tcp_bbr && echo "Loaded")
-    if [[ "$bbr_status" == "bbr" ]] && [[ -n "$bbr_module" ]]; then
-        echo -e "${YELLOW}BBR Status: ${GREEN}Enabled (Module: ${bbr_status})${NC}"
+    if [[ "$bbr_status" == "bbr" ]]; then
+        echo -e "${YELLOW}BBR Status: ${GREEN}Enabled${NC}"
     else
         echo -e "${YELLOW}BBR Status: ${RED}Disabled${NC}"
     fi
@@ -1195,7 +1177,7 @@ configure_tcp_mux() {
 
 remote_addr = "0.0.0.0:3080"
 transport = "tcpmux"
-token = "your_token_$(date +%s)" 
+token = "your_token" 
 connection_pool = 8
 aggressive_pool = false
 keepalive_period = 75
@@ -1213,6 +1195,13 @@ nodelay = true
 heartbeat = 40 
 channel_size = 2048
 mux_con = 8
+mux_version = 1
+mux_framesize = 32768 
+mux_recievebuffer = 4194304
+mux_streambuffer = 65536 
+sniffer = false 
+web_port = 8443
+log_level = "info"
 ports = []
 EOT
 
@@ -1296,40 +1285,56 @@ find_best_mtu() {
     echo -e "${YELLOW}Searching for the best MTU size (1280-1500)...${NC}"
     print_separator
     
-    local target="1.1.1.1"
+    local target="8.8.8.8"
     local best_mtu=1500
     local best_packets=0
     local best_time=9999
     local mtu_list=""
     
     # Test MTU sizes from 1280 to 1500
-    for mtu in $(seq 1280 20 1500); do
+    for mtu in {1280..1500..20}; do
         echo -ne "Testing MTU: $mtu... "
         
-        # Test with ping (2 packets)
-        local ping_result=$(ping -M do -s $((mtu - 28)) -c 2 -W 2 "$target" 2>&1)
-        local packets_received=$(echo "$ping_result" | grep -o "2 received" | wc -l)
-        local avg_time=$(echo "$ping_result" | grep "min/avg/max" | awk -F'/' '{print $5}' | cut -d' ' -f1 2>/dev/null)
+        # Calculate payload size (MTU - 28 bytes for IP header)
+        local payload=$((mtu - 28))
         
-        if [ -n "$avg_time" ] && [ "$packets_received" -eq 1 ]; then
-            avg_time=${avg_time%.*}  # Remove decimal
-            echo -e "${GREEN}✓ ${avg_time}ms${NC}"
+        # Test with ping (2 packets with 2 second timeout)
+        if ping -M do -s $payload -c 2 -W 2 "$target" > /tmp/ping_test.txt 2>&1; then
+            local packets_received=$(grep -o "2 received" /tmp/ping_test.txt | wc -l)
+            local avg_time=$(grep "min/avg/max" /tmp/ping_test.txt | awk -F'/' '{print $5}' | cut -d' ' -f1 2>/dev/null)
             
-            # Update best MTU if this one is better
-            if [ "$avg_time" -lt "$best_time" ] || [ "$packets_received" -gt "$best_packets" ]; then
-                best_mtu=$mtu
-                best_time=$avg_time
-                best_packets=$packets_received
+            if [ -n "$avg_time" ] && [ "$packets_received" -eq 1 ]; then
+                # Convert time to integer (remove decimal point)
+                avg_time=${avg_time%.*}
+                if [[ "$avg_time" =~ ^[0-9]+$ ]]; then
+                    echo -e "${GREEN}✓ ${avg_time}ms${NC}"
+                    
+                    # Update best MTU if this one is better (lower time or same time but more packets)
+                    if [ "$avg_time" -lt "$best_time" ] || ([ "$avg_time" -eq "$best_time" ] && [ "$mtu" -gt "$best_mtu" ]); then
+                        best_mtu=$mtu
+                        best_time=$avg_time
+                        best_packets=$packets_received
+                    fi
+                    
+                    mtu_list+="MTU $mtu: ${avg_time}ms ✓\n"
+                else
+                    echo -e "${YELLOW}✓ Connected (no time)${NC}"
+                    mtu_list+="MTU $mtu: Connected ✓\n"
+                fi
+            else
+                echo -e "${YELLOW}✓ Connected${NC}"
+                mtu_list+="MTU $mtu: Connected ✓\n"
             fi
-            
-            mtu_list+="MTU $mtu: ${avg_time}ms ✓\n"
         else
             echo -e "${RED}✗ Failed${NC}"
             mtu_list+="MTU $mtu: Failed ✗\n"
         fi
         
-        sleep 0.5
+        sleep 0.3
     done
+    
+    # Cleanup
+    rm -f /tmp/ping_test.txt
     
     print_separator
     echo -e "${YELLOW}Test Results:${NC}"
@@ -1337,11 +1342,27 @@ find_best_mtu() {
     print_separator
     
     if [ "$best_time" -eq 9999 ]; then
+        # If no MTU with timing found, try to find any working MTU
+        echo -e "${YELLOW}Looking for any working MTU...${NC}"
+        for mtu in {1500..1280..-20}; do
+            local payload=$((mtu - 28))
+            if ping -M do -s $payload -c 1 -W 1 "$target" >/dev/null 2>&1; then
+                best_mtu=$mtu
+                echo -e "${GREEN}Found working MTU: $mtu${NC}"
+                break
+            fi
+        done
+    fi
+    
+    if [ "$best_mtu" -eq 1500 ] && [ "$best_time" -eq 9999 ]; then
         echo -e "${RED}No stable MTU found! Keeping current MTU.${NC}"
         return 1
     fi
     
-    echo -e "${GREEN}Best MTU found: ${BOLD}$best_mtu${NC} (${best_time}ms)"
+    echo -e "${GREEN}Best MTU found: ${BOLD}$best_mtu${NC}"
+    if [ "$best_time" -ne 9999 ]; then
+        echo -e "Ping time: ${BOLD}${best_time}ms${NC}"
+    fi
     
     read -p "Apply this MTU? (yes/no): " apply_mtu
     if [[ "$apply_mtu" == "yes" ]] || [[ "$apply_mtu" == "y" ]]; then
@@ -1352,172 +1373,75 @@ find_best_mtu() {
     fi
 }
 
-# Iran VXLAN Tunnel (گزینه 18)
+# Iran VXLAN Tunnel (گزینه 18) - EXACT CODE AS REQUESTED
 setup_iran_tunnel() {
     echo -e "${YELLOW}Setting up IRAN VXLAN Tunnel...${NC}"
     print_separator
     
     read -p "🔹 Enter IP address of kharej server: " REMOTE_IP
     
-    if ! validate_ip "$REMOTE_IP"; then
-        echo -e "${RED}Invalid IP address!${NC}"
-        return 1
-    fi
-    
     IFACE=$(ip route | grep default | awk '{print $5}')
     VXLAN_IF="vxlan100"
-    
-    echo -e "${BLUE}Creating VXLAN interface...${NC}"
-    
-    # Remove existing interface if exists
-    ip link del $VXLAN_IF 2>/dev/null
-    
+
     # VXLAN setup
-    if ! ip link add $VXLAN_IF type vxlan id 100 dev $IFACE remote $REMOTE_IP dstport 4789; then
-        echo -e "${RED}Failed to create VXLAN interface!${NC}"
-        return 1
-    fi
-    
+    ip link add $VXLAN_IF type vxlan id 100 dev $IFACE remote $REMOTE_IP dstport 4789
     ip addr add 10.123.1.1/30 dev $VXLAN_IF
     ip -6 addr add fd11:1ceb:1d11::1/64 dev $VXLAN_IF
     ip link set $VXLAN_IF up
-    
-    # Enable IPv4 forwarding
-    sysctl -w net.ipv4.ip_forward=1
-    
-    # rc.local setup
+
+    # rc.local
     cat <<EOF > /etc/rc.local
 #!/bin/bash
-# VXLAN Tunnel for IRAN - Generated by $SCRIPT_NAME
-# Date: $(date)
-
 ip link add $VXLAN_IF type vxlan id 100 dev $IFACE remote $REMOTE_IP dstport 4789
 ip addr add 10.123.1.1/30 dev $VXLAN_IF
 ip -6 addr add fd11:1ceb:1d11::1/64 dev $VXLAN_IF
 ip link set $VXLAN_IF up
-sysctl -w net.ipv4.ip_forward=1
-
 exit 0
 EOF
 
     chmod +x /etc/rc.local
-    
-    # Enable rc-local service
-    if [ -f /etc/systemd/system/rc-local.service ] || [ -f /lib/systemd/system/rc-local.service ]; then
-        systemctl enable rc-local
-        systemctl start rc-local
-    else
-        # Create rc-local service if doesn't exist
-        cat <<EOF > /etc/systemd/system/rc-local.service
-[Unit]
-Description=/etc/rc.local Compatibility
-ConditionPathExists=/etc/rc.local
+    systemctl enable rc-local
+    systemctl start rc-local
 
-[Service]
-Type=forking
-ExecStart=/etc/rc.local start
-TimeoutSec=0
-StandardOutput=tty
-RemainAfterExit=yes
-SysVStartPriority=99
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        
-        systemctl daemon-reload
-        systemctl enable rc-local
-        systemctl start rc-local
-    fi
-    
-    echo -e "${GREEN}✅ IRAN VXLAN tunnel created to $REMOTE_IP (kharej)${NC}"
-    echo -e "${BLUE}Local IPv4: 10.123.1.1/30${NC}"
-    echo -e "${BLUE}Local IPv6: fd11:1ceb:1d11::1/64${NC}"
-    echo -e "${YELLOW}You can ping the remote server at: 10.123.1.2${NC}"
+    echo "✅ IRAN VXLAN tunnel created to $REMOTE_IP (kharej)"
+    echo -e "${GREEN}Tunnel setup completed!${NC}"
+    echo -e "${YELLOW}Local IP: 10.123.1.1${NC}"
+    echo -e "${YELLOW}Remote IP should be: 10.123.1.2${NC}"
 }
 
-# Kharej VXLAN Tunnel (گزینه 19)
+# Kharej VXLAN Tunnel (گزینه 19) - EXACT CODE AS REQUESTED
 setup_kharej_tunnel() {
     echo -e "${YELLOW}Setting up KHAREJ VXLAN Tunnel...${NC}"
     print_separator
     
     read -p "🛰  Enter IP of iran server: " REMOTE_IP
-    
-    if ! validate_ip "$REMOTE_IP"; then
-        echo -e "${RED}Invalid IP address!${NC}"
-        return 1
-    fi
-    
     IFACE=$(ip route | grep default | awk '{print $5}')
     VXLAN_IF="vxlan100"
-    
-    echo -e "${BLUE}Creating VXLAN interface...${NC}"
-    
-    # Remove existing interface if exists
-    ip link del $VXLAN_IF 2>/dev/null
-    
-    # VXLAN setup
-    if ! ip link add $VXLAN_IF type vxlan id 100 dev $IFACE remote $REMOTE_IP dstport 4789; then
-        echo -e "${RED}Failed to create VXLAN interface!${NC}"
-        return 1
-    fi
-    
+
+    # Interface
+    ip link add $VXLAN_IF type vxlan id 100 dev $IFACE remote $REMOTE_IP dstport 4789
     ip addr add 10.123.1.2/30 dev $VXLAN_IF
     ip -6 addr add fd11:1ceb:1d11::2/64 dev $VXLAN_IF
     ip link set $VXLAN_IF up
-    
-    # Enable IPv4 forwarding
-    sysctl -w net.ipv4.ip_forward=1
-    
-    # rc.local setup
+
+    # Create rc.local
     cat <<EOF > /etc/rc.local
 #!/bin/bash
-# VXLAN Tunnel for KHAREJ - Generated by $SCRIPT_NAME
-# Date: $(date)
-
 ip link add $VXLAN_IF type vxlan id 100 dev $IFACE remote $REMOTE_IP dstport 4789
 ip addr add 10.123.1.2/30 dev $VXLAN_IF
 ip -6 addr add fd11:1ceb:1d11::2/64 dev $VXLAN_IF
 ip link set $VXLAN_IF up
-sysctl -w net.ipv4.ip_forward=1
-
 exit 0
 EOF
 
     chmod +x /etc/rc.local
-    
-    # Enable rc-local service
-    if [ -f /etc/systemd/system/rc-local.service ] || [ -f /lib/systemd/system/rc-local.service ]; then
-        systemctl enable rc-local
-        systemctl start rc-local
-    else
-        # Create rc-local service if doesn't exist
-        cat <<EOF > /etc/systemd/system/rc-local.service
-[Unit]
-Description=/etc/rc.local Compatibility
-ConditionPathExists=/etc/rc.local
+    systemctl enable rc-local
+    systemctl start rc-local
 
-[Service]
-Type=forking
-ExecStart=/etc/rc.local start
-TimeoutSec=0
-StandardOutput=tty
-RemainAfterExit=yes
-SysVStartPriority=99
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        
-        systemctl daemon-reload
-        systemctl enable rc-local
-        systemctl start rc-local
-    fi
-    
-    echo -e "${GREEN}✅ VXLAN setup on KHAREJ completed${NC}"
-    echo -e "${BLUE}Local IPv4: 10.123.1.2/30${NC}"
-    echo -e "${BLUE}Local IPv6: fd11:1ceb:1d11::2/64${NC}"
-    echo -e "${YELLOW}You can ping the IRAN server at: 10.123.1.1${NC}"
+    echo "✅ VXLAN setup on KHAREJ completed (IPv4: 10.123.1.2 / IPv6: fd11:1ceb:1d11::2)"
+    echo -e "${GREEN}Tunnel setup completed!${NC}"
+    echo -e "${YELLOW}Local IP: 10.123.1.2${NC}"
+    echo -e "${YELLOW}Remote IP should be: 10.123.1.1${NC}"
 }
 
 # Delete VXLAN Tunnel (گزینه 20)
@@ -1533,20 +1457,17 @@ delete_vxlan_tunnel() {
     ip link del vxlan100 2>/dev/null
     ip link del vxlan200 2>/dev/null
     
-    # Disable rc.local
+    # Disable rc.local service
     systemctl stop rc-local 2>/dev/null
     systemctl disable rc-local 2>/dev/null
     
     # Remove rc.local file
     rm -f /etc/rc.local
     
-    # Remove rc-local service
-    rm -f /etc/systemd/system/rc-local.service
-    rm -f /lib/systemd/system/rc-local.service
-    systemctl daemon-reload 2>/dev/null
-    
-    # Disable IPv4 forwarding
-    sysctl -w net.ipv4.ip_forward=0
+    # Remove rc-local service files if they exist
+    rm -f /etc/systemd/system/rc-local.service 2>/dev/null
+    rm -f /lib/systemd/system/rc-local.service 2>/dev/null
+    rm -f /usr/lib/systemd/system/rc-local.service 2>/dev/null
     
     echo -e "${GREEN}✓ All VXLAN tunnels and configurations have been removed!${NC}"
 }
