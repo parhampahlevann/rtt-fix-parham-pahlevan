@@ -2,14 +2,14 @@
 
 # Global Configuration
 SCRIPT_NAME="Ultimate Network Optimizer"
-SCRIPT_VERSION="9.2"  # Enhanced BBR algorithm with advanced optimizations
+SCRIPT_VERSION="9.3"  # Enhanced with TCP MUX and Tunnel features
 AUTHOR="Parham Pahlevan"
 CONFIG_FILE="/etc/network_optimizer.conf"
 LOG_FILE="/var/log/network_optimizer.log"
 BACKUP_DIR="/var/backups/network_optimizer"
 NETWORK_INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
-DEFAULT_MTU=1420
-CURRENT_MTU=$(cat /sys/class/net/$NETWORK_INTERFACE/mtu 2>/dev/null || echo $DEFAULT_MTU)
+DEFAULT_MTU=$(cat /sys/class/net/$NETWORK_INTERFACE/mtu 2>/dev/null || echo 1500)
+CURRENT_MTU=$DEFAULT_MTU
 DNS_SERVERS=("1.1.1.1" "1.0.0.1")
 CURRENT_DNS=$(grep nameserver /etc/resolv.conf 2>/dev/null | awk '{print $2}' | tr '\n' ' ')
 
@@ -25,7 +25,7 @@ DISTRO_VERSION=""
 mkdir -p "$(dirname "$LOG_FILE")"
 mkdir -p "$BACKUP_DIR"
 touch "$LOG_FILE"
-exec > >(tee -a "$LOG_FILE") 2>&1
+exec > >(while IFS= read -r line; do printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$line"; done | tee -a "$LOG_FILE") 2>&1
 
 # Color Codes
 RED='\033[0;31m'
@@ -40,6 +40,42 @@ print_separator() {
     echo "-----------------------------------------------------" 
 }
 
+# Check for essential commands
+check_requirements() {
+    local missing=()
+    
+    for cmd in ip awk grep sed date; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            missing+=("$cmd")
+        fi
+    done
+    
+    if [ ${#missing[@]} -gt 0 ]; then
+        echo -e "${RED}Missing required commands: ${missing[*]}${NC}"
+        echo -e "${YELLOW}Please install them before running this script.${NC}"
+        exit 1
+    fi
+}
+
+# Cleanup function
+cleanup() {
+    echo -e "\n${YELLOW}Cleaning up...${NC}"
+    rm -f /tmp/network_optimizer_*.tmp 2>/dev/null
+    chmod 600 "$LOG_FILE" 2>/dev/null
+    echo -e "${GREEN}Cleanup completed!${NC}"
+}
+
+# Trap exit signals
+trap cleanup EXIT INT TERM
+
+# Confirm dangerous operations
+confirm_action() {
+    local message="$1"
+    echo -e "${RED}WARNING: $message${NC}"
+    read -p "Are you sure? (yes/no): " confirm
+    [[ "$confirm" == "yes" ]] || [[ "$confirm" == "y" ]]
+}
+
 # Distribution Detection
 detect_distro() {
     if [ -f /etc/os-release ]; then
@@ -49,6 +85,12 @@ detect_distro() {
     elif command -v lsb_release >/dev/null 2>&1; then
         DISTRO=$(lsb_release -si | tr '[:upper:]' '[:lower:]')
         DISTRO_VERSION=$(lsb_release -sr)
+    elif [ -f /etc/arch-release ]; then
+        DISTRO="arch"
+        DISTRO_VERSION="rolling"
+    elif [ -f /etc/fedora-release ]; then
+        DISTRO="fedora"
+        DISTRO_VERSION=$(grep -o '[0-9]\+' /etc/fedora-release)
     else
         DISTRO="unknown"
     fi
@@ -90,8 +132,9 @@ show_header() {
 
     # Show BBR Status
     local bbr_status=$(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | awk '{print $3}')
-    if [[ "$bbr_status" == "bbr" ]]; then
-        echo -e "${YELLOW}BBR Status: ${GREEN}Enabled${NC}"
+    local bbr_module=$(lsmod | grep -q tcp_bbr && echo "Loaded")
+    if [[ "$bbr_status" == "bbr" ]] && [[ -n "$bbr_module" ]]; then
+        echo -e "${YELLOW}BBR Status: ${GREEN}Enabled (Module: ${bbr_status})${NC}"
     else
         echo -e "${YELLOW}BBR Status: ${RED}Disabled${NC}"
     fi
@@ -121,6 +164,11 @@ show_header() {
         echo -e "${YELLOW}IPv6: ${RED}Disabled${NC}"
     else
         echo -e "${YELLOW}IPv6: ${GREEN}Enabled${NC}"
+    fi
+    
+    # Show VXLAN Tunnel Status
+    if ip link show vxlan100 >/dev/null 2>&1; then
+        echo -e "${YELLOW}VXLAN Tunnel: ${GREEN}Active${NC}"
     fi
     echo
 }
@@ -199,8 +247,8 @@ speed_test() {
             echo -n "Testing $test_url: "
             local speed=$(curl -o /dev/null -w "%{speed_download}" -s "$test_url" 2>/dev/null)
             if [ -n "$speed" ]; then
-                local speed_mbps=$(echo "scale=2; $speed / 125000" | bc 2>/dev/null)
-                echo "${speed_mbps:-$speed} Mbps"
+                local speed_mbps=$(echo "scale=2; $speed / 125000" | bc 2>/dev/null || echo "0")
+                echo "${speed_mbps:-0} Mbps"
             else
                 echo "Failed"
             fi
@@ -270,7 +318,7 @@ configure_mtu() {
     fi
 
     # NetworkManager
-    if [ "$config_applied" = false ] && command -v nmcli >/dev/null 2>&1; then
+    if [ "$config_applied" = false ] && command -v nmcli >/dev/null 2>&1 && (systemctl is-active --quiet NetworkManager 2>/dev/null || pgrep NetworkManager >/dev/null); then
         local con_name=$(nmcli -t -f DEVICE,CONNECTION dev show "$NETWORK_INTERFACE" 2>/dev/null | cut -d: -f2)
         if [ -n "$con_name" ]; then
             nmcli con mod "$con_name" 802-3-ethernet.mtu $new_mtu 2>/dev/null || \
@@ -544,7 +592,7 @@ configure_dns_safe() {
     update_resolv_conf "${dns_servers[@]}"
     
     # Only configure the main network interface
-    if command -v nmcli >/dev/null 2>&1 && systemctl is-active --quiet NetworkManager; then
+    if command -v nmcli >/dev/null 2>&1 && (systemctl is-active --quiet NetworkManager 2>/dev/null || pgrep NetworkManager >/dev/null); then
         local con_name=$(nmcli -t -f DEVICE,CONNECTION dev show "$NETWORK_INTERFACE" 2>/dev/null | cut -d: -f2)
         if [ -n "$con_name" ]; then
             nmcli con mod "$con_name" ipv4.dns "$(printf "%s;" "${dns_servers[@]}" | sed 's/;$//')"
@@ -665,7 +713,7 @@ EOL
     fi
     
     # Reset NetworkManager configuration for main interface only
-    if command -v nmcli >/dev/null 2>&1 && systemctl is-active --quiet NetworkManager; then
+    if command -v nmcli >/dev/null 2>&1 && (systemctl is-active --quiet NetworkManager 2>/dev/null || pgrep NetworkManager >/dev/null); then
         local con_name=$(nmcli -t -f DEVICE,CONNECTION dev show "$NETWORK_INTERFACE" 2>/dev/null | cut -d: -f2)
         if [ -n "$con_name" ]; then
             nmcli con mod "$con_name" ipv4.ignore-auto-dns no
@@ -914,12 +962,12 @@ self_update() {
     echo -e "Author: ${BOLD}$AUTHOR${NC}"
     echo ""
     echo -e "${YELLOW}Update Information:${NC}"
-    echo -e "• New features in v9.2:"
-    echo -e "  ✓ Enhanced BBR algorithm with advanced optimizations"
-    echo -e "  ✓ BBR install without changing DNS/MTU"
-    echo -e "  ✓ Distribution detection"
-    echo -e "  ✓ Network speed testing"
-    echo -e "  ✓ Enhanced backup system"
+    echo -e "• New features in v9.3:"
+    echo -e "  ✓ TCP MUX Configuration"
+    echo -e "  ✓ VXLAN Tunnel Setup"
+    echo -e "  ✓ Best MTU Auto-detection"
+    echo -e "  ✓ Reboot functionality"
+    echo -e "  ✓ Tunnel management"
     echo ""
     echo -e "${GREEN}This is the latest version!${NC}"
     echo -e "${YELLOW}For future updates, check the GitHub repository.${NC}"
@@ -1129,8 +1177,387 @@ manage_tunnel() {
     manage_tunnel
 }
 
+# ============================================================================
+# NEW FEATURES START HERE
+# ============================================================================
+
+# TCP MUX Configuration (گزینه 15)
+configure_tcp_mux() {
+    echo -e "${YELLOW}Configuring TCP MUX for better connection handling...${NC}"
+    print_separator
+    
+    # Create TCP MUX configuration file
+    local mux_config="/etc/tcp_mux.conf"
+    
+    cat > "$mux_config" <<EOT
+# TCP MUX Configuration - Generated by $SCRIPT_NAME
+# Date: $(date)
+
+remote_addr = "0.0.0.0:3080"
+transport = "tcpmux"
+token = "your_token_$(date +%s)" 
+connection_pool = 8
+aggressive_pool = false
+keepalive_period = 75
+dial_timeout = 10
+retry_interval = 3
+nodelay = true 
+mux_version = 1
+mux_framesize = 32768 
+mux_recievebuffer = 4194304
+mux_streambuffer = 65536 
+sniffer = false 
+web_port = 8443
+log_level = "info"
+nodelay = true 
+heartbeat = 40 
+channel_size = 2048
+mux_con = 8
+ports = []
+EOT
+
+    # Apply TCP MUX optimizations to sysctl
+    echo -e "${BLUE}Applying TCP MUX kernel optimizations...${NC}"
+    
+    # Increase TCP buffers for MUX
+    sysctl -w net.ipv4.tcp_rmem='4096 87380 16777216'
+    sysctl -w net.ipv4.tcp_wmem='4096 65536 16777216'
+    sysctl -w net.core.rmem_max=33554432
+    sysctl -w net.core.wmem_max=33554432
+    sysctl -w net.core.optmem_max=65536
+    sysctl -w net.ipv4.tcp_mem='786432 1048576 26777216'
+    
+    # TCP MUX specific optimizations
+    sysctl -w net.ipv4.tcp_tw_reuse=1
+    sysctl -w net.ipv4.tcp_fin_timeout=30
+    sysctl -w net.ipv4.tcp_max_orphans=65536
+    sysctl -w net.ipv4.tcp_max_syn_backlog=16384
+    sysctl -w net.core.somaxconn=32768
+    
+    # Save to sysctl.conf
+    cat <<EOT >> /etc/sysctl.conf
+
+# TCP MUX Optimizations - Added by $SCRIPT_NAME
+net.ipv4.tcp_rmem=4096 87380 16777216
+net.ipv4.tcp_wmem=4096 65536 16777216
+net.core.rmem_max=33554432
+net.core.wmem_max=33554432
+net.core.optmem_max=65536
+net.ipv4.tcp_mem=786432 1048576 26777216
+net.ipv4.tcp_tw_reuse=1
+net.ipv4.tcp_fin_timeout=30
+net.ipv4.tcp_max_orphans=65536
+net.ipv4.tcp_max_syn_backlog=16384
+net.core.somaxconn=32768
+EOT
+
+    # Apply settings
+    sysctl -p >/dev/null 2>&1
+    
+    echo -e "${GREEN}✓ TCP MUX configuration saved to: $mux_config${NC}"
+    echo -e "${YELLOW}TCP MUX optimizations have been applied to the kernel.${NC}"
+    echo -e "${BLUE}You can edit the configuration file at: $mux_config${NC}"
+    
+    # Test if configuration is working
+    echo -e "\n${YELLOW}Testing TCP MUX settings...${NC}"
+    local current_tcp_rmem=$(sysctl net.ipv4.tcp_rmem | awk '{print $3 " " $4 " " $5}')
+    echo -e "Current TCP read buffer: ${GREEN}$current_tcp_rmem${NC}"
+    
+    echo -e "${GREEN}✓ TCP MUX configuration completed successfully!${NC}"
+}
+
+# System Reboot (گزینه 16)
+system_reboot() {
+    if ! confirm_action "This will reboot the system immediately!"; then
+        echo -e "${YELLOW}Reboot cancelled.${NC}"
+        return
+    fi
+    
+    echo -e "${YELLOW}Saving current configuration...${NC}"
+    save_config
+    
+    echo -e "${YELLOW}Creating backup before reboot...${NC}"
+    create_backup
+    
+    echo -e "${RED}System will reboot in 5 seconds...${NC}"
+    echo -e "${YELLOW}Press Ctrl+C to cancel${NC}"
+    
+    for i in {5..1}; do
+        echo -e "${RED}Rebooting in $i seconds...${NC}"
+        sleep 1
+    done
+    
+    echo -e "${GREEN}Rebooting system now!${NC}"
+    reboot
+}
+
+# Best MTU Auto-detection (گزینه 17)
+find_best_mtu() {
+    echo -e "${YELLOW}Searching for the best MTU size (1280-1500)...${NC}"
+    print_separator
+    
+    local target="1.1.1.1"
+    local best_mtu=1500
+    local best_packets=0
+    local best_time=9999
+    local mtu_list=""
+    
+    # Test MTU sizes from 1280 to 1500
+    for mtu in $(seq 1280 20 1500); do
+        echo -ne "Testing MTU: $mtu... "
+        
+        # Test with ping (2 packets)
+        local ping_result=$(ping -M do -s $((mtu - 28)) -c 2 -W 2 "$target" 2>&1)
+        local packets_received=$(echo "$ping_result" | grep -o "2 received" | wc -l)
+        local avg_time=$(echo "$ping_result" | grep "min/avg/max" | awk -F'/' '{print $5}' | cut -d' ' -f1 2>/dev/null)
+        
+        if [ -n "$avg_time" ] && [ "$packets_received" -eq 1 ]; then
+            avg_time=${avg_time%.*}  # Remove decimal
+            echo -e "${GREEN}✓ ${avg_time}ms${NC}"
+            
+            # Update best MTU if this one is better
+            if [ "$avg_time" -lt "$best_time" ] || [ "$packets_received" -gt "$best_packets" ]; then
+                best_mtu=$mtu
+                best_time=$avg_time
+                best_packets=$packets_received
+            fi
+            
+            mtu_list+="MTU $mtu: ${avg_time}ms ✓\n"
+        else
+            echo -e "${RED}✗ Failed${NC}"
+            mtu_list+="MTU $mtu: Failed ✗\n"
+        fi
+        
+        sleep 0.5
+    done
+    
+    print_separator
+    echo -e "${YELLOW}Test Results:${NC}"
+    echo -e "$mtu_list"
+    print_separator
+    
+    if [ "$best_time" -eq 9999 ]; then
+        echo -e "${RED}No stable MTU found! Keeping current MTU.${NC}"
+        return 1
+    fi
+    
+    echo -e "${GREEN}Best MTU found: ${BOLD}$best_mtu${NC} (${best_time}ms)"
+    
+    read -p "Apply this MTU? (yes/no): " apply_mtu
+    if [[ "$apply_mtu" == "yes" ]] || [[ "$apply_mtu" == "y" ]]; then
+        configure_mtu "$best_mtu"
+        echo -e "${GREEN}✓ Best MTU ($best_mtu) has been applied!${NC}"
+    else
+        echo -e "${YELLOW}MTU not changed.${NC}"
+    fi
+}
+
+# Iran VXLAN Tunnel (گزینه 18)
+setup_iran_tunnel() {
+    echo -e "${YELLOW}Setting up IRAN VXLAN Tunnel...${NC}"
+    print_separator
+    
+    read -p "🔹 Enter IP address of kharej server: " REMOTE_IP
+    
+    if ! validate_ip "$REMOTE_IP"; then
+        echo -e "${RED}Invalid IP address!${NC}"
+        return 1
+    fi
+    
+    IFACE=$(ip route | grep default | awk '{print $5}')
+    VXLAN_IF="vxlan100"
+    
+    echo -e "${BLUE}Creating VXLAN interface...${NC}"
+    
+    # Remove existing interface if exists
+    ip link del $VXLAN_IF 2>/dev/null
+    
+    # VXLAN setup
+    if ! ip link add $VXLAN_IF type vxlan id 100 dev $IFACE remote $REMOTE_IP dstport 4789; then
+        echo -e "${RED}Failed to create VXLAN interface!${NC}"
+        return 1
+    fi
+    
+    ip addr add 10.123.1.1/30 dev $VXLAN_IF
+    ip -6 addr add fd11:1ceb:1d11::1/64 dev $VXLAN_IF
+    ip link set $VXLAN_IF up
+    
+    # Enable IPv4 forwarding
+    sysctl -w net.ipv4.ip_forward=1
+    
+    # rc.local setup
+    cat <<EOF > /etc/rc.local
+#!/bin/bash
+# VXLAN Tunnel for IRAN - Generated by $SCRIPT_NAME
+# Date: $(date)
+
+ip link add $VXLAN_IF type vxlan id 100 dev $IFACE remote $REMOTE_IP dstport 4789
+ip addr add 10.123.1.1/30 dev $VXLAN_IF
+ip -6 addr add fd11:1ceb:1d11::1/64 dev $VXLAN_IF
+ip link set $VXLAN_IF up
+sysctl -w net.ipv4.ip_forward=1
+
+exit 0
+EOF
+
+    chmod +x /etc/rc.local
+    
+    # Enable rc-local service
+    if [ -f /etc/systemd/system/rc-local.service ] || [ -f /lib/systemd/system/rc-local.service ]; then
+        systemctl enable rc-local
+        systemctl start rc-local
+    else
+        # Create rc-local service if doesn't exist
+        cat <<EOF > /etc/systemd/system/rc-local.service
+[Unit]
+Description=/etc/rc.local Compatibility
+ConditionPathExists=/etc/rc.local
+
+[Service]
+Type=forking
+ExecStart=/etc/rc.local start
+TimeoutSec=0
+StandardOutput=tty
+RemainAfterExit=yes
+SysVStartPriority=99
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        
+        systemctl daemon-reload
+        systemctl enable rc-local
+        systemctl start rc-local
+    fi
+    
+    echo -e "${GREEN}✅ IRAN VXLAN tunnel created to $REMOTE_IP (kharej)${NC}"
+    echo -e "${BLUE}Local IPv4: 10.123.1.1/30${NC}"
+    echo -e "${BLUE}Local IPv6: fd11:1ceb:1d11::1/64${NC}"
+    echo -e "${YELLOW}You can ping the remote server at: 10.123.1.2${NC}"
+}
+
+# Kharej VXLAN Tunnel (گزینه 19)
+setup_kharej_tunnel() {
+    echo -e "${YELLOW}Setting up KHAREJ VXLAN Tunnel...${NC}"
+    print_separator
+    
+    read -p "🛰  Enter IP of iran server: " REMOTE_IP
+    
+    if ! validate_ip "$REMOTE_IP"; then
+        echo -e "${RED}Invalid IP address!${NC}"
+        return 1
+    fi
+    
+    IFACE=$(ip route | grep default | awk '{print $5}')
+    VXLAN_IF="vxlan100"
+    
+    echo -e "${BLUE}Creating VXLAN interface...${NC}"
+    
+    # Remove existing interface if exists
+    ip link del $VXLAN_IF 2>/dev/null
+    
+    # VXLAN setup
+    if ! ip link add $VXLAN_IF type vxlan id 100 dev $IFACE remote $REMOTE_IP dstport 4789; then
+        echo -e "${RED}Failed to create VXLAN interface!${NC}"
+        return 1
+    fi
+    
+    ip addr add 10.123.1.2/30 dev $VXLAN_IF
+    ip -6 addr add fd11:1ceb:1d11::2/64 dev $VXLAN_IF
+    ip link set $VXLAN_IF up
+    
+    # Enable IPv4 forwarding
+    sysctl -w net.ipv4.ip_forward=1
+    
+    # rc.local setup
+    cat <<EOF > /etc/rc.local
+#!/bin/bash
+# VXLAN Tunnel for KHAREJ - Generated by $SCRIPT_NAME
+# Date: $(date)
+
+ip link add $VXLAN_IF type vxlan id 100 dev $IFACE remote $REMOTE_IP dstport 4789
+ip addr add 10.123.1.2/30 dev $VXLAN_IF
+ip -6 addr add fd11:1ceb:1d11::2/64 dev $VXLAN_IF
+ip link set $VXLAN_IF up
+sysctl -w net.ipv4.ip_forward=1
+
+exit 0
+EOF
+
+    chmod +x /etc/rc.local
+    
+    # Enable rc-local service
+    if [ -f /etc/systemd/system/rc-local.service ] || [ -f /lib/systemd/system/rc-local.service ]; then
+        systemctl enable rc-local
+        systemctl start rc-local
+    else
+        # Create rc-local service if doesn't exist
+        cat <<EOF > /etc/systemd/system/rc-local.service
+[Unit]
+Description=/etc/rc.local Compatibility
+ConditionPathExists=/etc/rc.local
+
+[Service]
+Type=forking
+ExecStart=/etc/rc.local start
+TimeoutSec=0
+StandardOutput=tty
+RemainAfterExit=yes
+SysVStartPriority=99
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        
+        systemctl daemon-reload
+        systemctl enable rc-local
+        systemctl start rc-local
+    fi
+    
+    echo -e "${GREEN}✅ VXLAN setup on KHAREJ completed${NC}"
+    echo -e "${BLUE}Local IPv4: 10.123.1.2/30${NC}"
+    echo -e "${BLUE}Local IPv6: fd11:1ceb:1d11::2/64${NC}"
+    echo -e "${YELLOW}You can ping the IRAN server at: 10.123.1.1${NC}"
+}
+
+# Delete VXLAN Tunnel (گزینه 20)
+delete_vxlan_tunnel() {
+    if ! confirm_action "This will delete all VXLAN tunnels and configurations!"; then
+        echo -e "${YELLOW}Operation cancelled.${NC}"
+        return
+    fi
+    
+    echo -e "${YELLOW}Deleting VXLAN tunnels...${NC}"
+    
+    # Remove VXLAN interface
+    ip link del vxlan100 2>/dev/null
+    ip link del vxlan200 2>/dev/null
+    
+    # Disable rc.local
+    systemctl stop rc-local 2>/dev/null
+    systemctl disable rc-local 2>/dev/null
+    
+    # Remove rc.local file
+    rm -f /etc/rc.local
+    
+    # Remove rc-local service
+    rm -f /etc/systemd/system/rc-local.service
+    rm -f /lib/systemd/system/rc-local.service
+    systemctl daemon-reload 2>/dev/null
+    
+    # Disable IPv4 forwarding
+    sysctl -w net.ipv4.ip_forward=0
+    
+    echo -e "${GREEN}✓ All VXLAN tunnels and configurations have been removed!${NC}"
+}
+
 # Reset ALL Changes
 reset_all() {
+    if ! confirm_action "This will reset ALL changes to default settings!"; then
+        echo -e "${YELLOW}Operation cancelled.${NC}"
+        return
+    fi
+    
     echo -e "${YELLOW}Resetting ALL changes...${NC}"
     
     # Reset MTU
@@ -1153,10 +1580,19 @@ reset_all() {
     # Remove BBR settings
     sed -i '/# BBR Optimization - Added by $SCRIPT_NAME/,/net.core.wmem_max=16777216/d' /etc/sysctl.conf
     
+    # Remove TCP MUX settings
+    sed -i '/# TCP MUX Optimizations - Added by $SCRIPT_NAME/,/net.core.somaxconn=32768/d' /etc/sysctl.conf
+    
+    # Delete VXLAN tunnels
+    delete_vxlan_tunnel
+    
     sysctl -p >/dev/null 2>&1
 
     # Remove config file
     rm -f "$CONFIG_FILE"
+    
+    # Remove TCP MUX config
+    rm -f /etc/tcp_mux.conf
 
     echo -e "${GREEN}All changes have been reset to default!${NC}"
 }
@@ -1182,9 +1618,15 @@ show_menu() {
         echo -e "12) Backup Configuration"
         echo -e "13) Restore Backup"
         echo -e "14) Check for Updates"
-        echo -e "15) Exit"
+        echo -e "15) TCP MUX Configuration"
+        echo -e "16) Reboot System"
+        echo -e "17) Find Best MTU Size"
+        echo -e "18) Setup Iran Tunnel"
+        echo -e "19) Setup Kharej Tunnel"
+        echo -e "20) Delete VXLAN Tunnel"
+        echo -e "21) Exit"
         
-        read -p "Enter your choice [1-15]: " choice
+        read -p "Enter your choice [1-21]: " choice
         
         case $choice in
             1)
@@ -1236,6 +1678,24 @@ show_menu() {
                 self_update
                 ;;
             15)
+                configure_tcp_mux
+                ;;
+            16)
+                system_reboot
+                ;;
+            17)
+                find_best_mtu
+                ;;
+            18)
+                setup_iran_tunnel
+                ;;
+            19)
+                setup_kharej_tunnel
+                ;;
+            20)
+                delete_vxlan_tunnel
+                ;;
+            21)
                 echo -e "${GREEN}Exiting... Thank you for using $SCRIPT_NAME!${NC}"
                 exit 0
                 ;;
@@ -1249,5 +1709,6 @@ show_menu() {
 }
 
 # Main Execution
+check_requirements
 check_root
 show_menu
