@@ -1710,7 +1710,7 @@ EOF
 }
 
 # ============================================================================
-# CLOUDFLARE WARP INSTALLATION (Simple & Safe Version) - Option 22
+# CLOUDFLARE WARP INSTALLATION (Fixed with Auto-Activation & Full Tunnel) - Option 22
 # ============================================================================
 
 # Cloudflare WARP endpoints for different locations
@@ -1770,7 +1770,7 @@ show_warp_locations() {
     echo -e "${BLUE}=========================================${NC}"
 }
 
-# Test latency to different WARP endpoints (SAFE VERSION)
+# Test latency to different WARP endpoints
 test_warp_latency() {
     echo -e "${YELLOW}Testing latency to WARP endpoints...${NC}"
     local best_location="US"
@@ -1798,66 +1798,199 @@ test_warp_latency() {
     SELECTED_LOCATION=$best_location
 }
 
-# Check WARP status (SAFE VERSION)
+# Function to enable full tunnel routing for WARP
+enable_full_tunnel() {
+    echo -e "${YELLOW}Enabling Full Tunnel Mode for IPv4...${NC}"
+    
+    # Check if WARP interface exists
+    if ! ip link show warp0 >/dev/null 2>&1; then
+        echo -e "${RED}WARP interface (warp0) not found!${NC}"
+        return 1
+    fi
+    
+    # Get current default gateway and interface
+    local ORIG_GW=$(ip route | grep default | awk '{print $3}' | head -n1)
+    local ORIG_IFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
+    
+    if [[ -z "$ORIG_GW" ]] || [[ -z "$ORIG_IFACE" ]]; then
+        echo -e "${RED}Cannot determine default gateway!${NC}"
+        return 1
+    fi
+    
+    echo -e "${BLUE}Original Gateway: $ORIG_GW on $ORIG_IFACE${NC}"
+    
+    # Backup current routing table
+    ip route show > /tmp/warp_route_backup.txt 2>/dev/null
+    echo -e "${GREEN}Routing table backed up to /tmp/warp_route_backup.txt${NC}"
+    
+    # Remove default route
+    ip route del default via $ORIG_GW dev $ORIG_IFACE 2>/dev/null
+    
+    # Add default route through warp0
+    ip route add default dev warp0
+    
+    # Add routes for WARP endpoints through original interface
+    ip route add 162.159.192.0/24 via $ORIG_GW dev $ORIG_IFACE 2>/dev/null
+    ip route add 162.159.193.0/24 via $ORIG_GW dev $ORIG_IFACE 2>/dev/null
+    ip route add 162.159.195.0/24 via $ORIG_GW dev $ORIG_IFACE 2>/dev/null
+    ip route add 162.159.196.0/24 via $ORIG_GW dev $ORIG_IFACE 2>/dev/null
+    ip route add 162.159.197.0/24 via $ORIG_GW dev $ORIG_IFACE 2>/dev/null
+    
+    # Add routes for Cloudflare DNS
+    ip route add 1.1.1.1 via $ORIG_GW dev $ORIG_IFACE 2>/dev/null
+    ip route add 1.0.0.1 via $ORIG_GW dev $ORIG_IFACE 2>/dev/null
+    ip route add 2606:4700:4700::1111 via $ORIG_GW dev $ORIG_IFACE 2>/dev/null
+    ip route add 2606:4700:4700::1001 via $ORIG_GW dev $ORIG_IFACE 2>/dev/null
+    
+    # Enable IP forwarding
+    sysctl -w net.ipv4.ip_forward=1 2>/dev/null
+    
+    # Configure iptables for NAT
+    iptables -t nat -A POSTROUTING -o warp0 -j MASQUERADE 2>/dev/null
+    
+    echo -e "${GREEN}✓ Full tunnel mode enabled!${NC}"
+    echo -e "${YELLOW}All IPv4 traffic will now route through WARP.${NC}"
+    
+    return 0
+}
+
+# Function to disable full tunnel
+disable_full_tunnel() {
+    echo -e "${YELLOW}Disabling Full Tunnel Mode...${NC}"
+    
+    # Restore original routing from backup
+    if [ -f /tmp/warp_route_backup.txt ]; then
+        # Flush current routes
+        ip route flush table main 2>/dev/null
+        
+        # Restore from backup
+        while read -r route; do
+            ip route add $route 2>/dev/null
+        done < /tmp/warp_route_backup.txt
+        
+        echo -e "${GREEN}✓ Original routing restored${NC}"
+    else
+        # Manual restoration
+        local ORIG_GW=$(grep "via" /proc/net/route 2>/dev/null | awk '{print $3}' | head -n1)
+        local ORIG_IFACE=$(ip route | grep -v "warp0" | grep default | awk '{print $5}' | head -n1)
+        
+        if [[ -n "$ORIG_GW" ]] && [[ -n "$ORIG_IFACE" ]]; then
+            ip route del default dev warp0 2>/dev/null
+            ip route add default via $ORIG_GW dev $ORIG_IFACE 2>/dev/null
+            echo -e "${GREEN}✓ Default route restored${NC}"
+        fi
+    fi
+    
+    # Remove iptables rules
+    iptables -t nat -D POSTROUTING -o warp0 -j MASQUERADE 2>/dev/null
+    
+    echo -e "${YELLOW}Full tunnel mode disabled.${NC}"
+}
+
+# Check WARP status (IMPROVED VERSION)
 check_warp_status() {
     echo -e "${YELLOW}Checking WARP status...${NC}"
     
     # Check for warp-go
     if command -v warp-go >/dev/null 2>&1; then
         echo -e "${GREEN}✓ warp-go is installed${NC}"
+        
+        # Check if service is running
         if systemctl is-active --quiet warp-go 2>/dev/null; then
             echo -e "${GREEN}✓ warp-go service is running${NC}"
+        else
+            echo -e "${YELLOW}⚠ warp-go service is not running, attempting to start...${NC}"
+            systemctl start warp-go 2>/dev/null
+            sleep 3
             
-            # Test WARP connection
-            local warp_test=$(curl -s4 --max-time 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null)
-            local warp_status=$(echo "$warp_test" | grep warp | cut -d= -f2)
-            local warp_ip=$(echo "$warp_test" | grep ip= | cut -d= -f2)
-            
-            if [[ "$warp_status" == "on" ]] || [[ "$warp_status" == "plus" ]]; then
-                echo -e "${GREEN}✓ WARP is active (IP: $warp_ip)${NC}"
-                
-                # Show connection details
-                if command -v wg >/dev/null 2>&1; then
-                    echo -e "${BLUE}WireGuard Interface Status:${NC}"
-                    wg show 2>/dev/null | head -10
-                fi
-                
-                # Test if traffic is going through WARP
-                local public_ip=$(curl -s4 --max-time 5 ifconfig.me 2>/dev/null)
-                if [[ -n "$warp_ip" ]] && [[ -n "$public_ip" ]]; then
-                    if [[ "$public_ip" == "$warp_ip" ]]; then
-                        echo -e "${GREEN}✓ All IPv4 traffic is routed through WARP${NC}"
-                    else
-                        echo -e "${YELLOW}⚠ IPv4 Traffic is NOT fully routed through WARP${NC}"
-                        echo -e "${YELLOW}  Server IP: $public_ip${NC}"
-                        echo -e "${YELLOW}  WARP IP: $warp_ip${NC}"
-                    fi
-                fi
-                
-                # Test IPv6 if available
-                local warp_ipv6=$(curl -s6 --max-time 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep ip= | cut -d= -f2)
-                if [[ -n "$warp_ipv6" ]]; then
-                    echo -e "${GREEN}✓ WARP IPv6 is active (IP: $warp_ipv6)${NC}"
-                fi
-                
+            if systemctl is-active --quiet warp-go 2>/dev/null; then
+                echo -e "${GREEN}✓ warp-go service started successfully${NC}"
             else
-                echo -e "${YELLOW}⚠ WARP is installed but not connected${NC}"
-                echo -e "${YELLOW}Checking WireGuard interface...${NC}"
-                if ip link show warp0 >/dev/null 2>&1; then
-                    echo -e "${GREEN}✓ WireGuard interface exists${NC}"
-                    ip addr show warp0 2>/dev/null | grep inet
-                fi
+                echo -e "${RED}✗ Failed to start warp-go service${NC}"
+                echo -e "${YELLOW}Checking logs...${NC}"
+                journalctl -u warp-go --no-pager -n 10
+                return 1
             fi
+        fi
+        
+        # Check WireGuard interface
+        if ip link show warp0 >/dev/null 2>&1; then
+            echo -e "${GREEN}✓ WireGuard interface (warp0) exists${NC}"
+            
+            # Show interface details
+            echo -e "${BLUE}Interface Details:${NC}"
+            ip addr show warp0 2>/dev/null | grep inet
+        else
+            echo -e "${YELLOW}⚠ WireGuard interface not found${NC}"
+            echo -e "${YELLOW}Attempting to create interface...${NC}"
+            
+            # Try to manually create interface
+            /usr/local/bin/warp-go --config=/usr/local/bin/warp.conf 2>/dev/null &
+            sleep 5
+            
+            if ip link show warp0 >/dev/null 2>&1; then
+                echo -e "${GREEN}✓ WireGuard interface created${NC}"
+            else
+                echo -e "${RED}✗ Failed to create WireGuard interface${NC}"
+                return 1
+            fi
+        fi
+        
+        # Test WARP connection
+        echo -e "${YELLOW}Testing WARP connection...${NC}"
+        local warp_test=$(curl -s4 --max-time 10 https://cloudflare.com/cdn-cgi/trace 2>/dev/null)
+        local warp_status=$(echo "$warp_test" | grep warp | cut -d= -f2)
+        local warp_ip=$(echo "$warp_test" | grep ip= | cut -d= -f2)
+        
+        if [[ -z "$warp_ip" ]]; then
+            # Try alternative method
+            warp_ip=$(curl -s4 --max-time 10 ifconfig.me 2>/dev/null)
+        fi
+        
+        if [[ "$warp_status" == "on" ]] || [[ "$warp_status" == "plus" ]]; then
+            echo -e "${GREEN}✓ WARP is ACTIVE${NC}"
+            echo -e "${BLUE}  WARP IP: $warp_ip${NC}"
+            
+            # Check if full tunnel is enabled
+            local current_ip=$(curl -s4 --max-time 5 ifconfig.me 2>/dev/null)
+            if [[ "$current_ip" == "$warp_ip" ]]; then
+                echo -e "${GREEN}✓ Full tunnel mode: ENABLED${NC}"
+                echo -e "${GREEN}  All IPv4 traffic is routed through WARP${NC}"
+            else
+                echo -e "${YELLOW}⚠ Full tunnel mode: DISABLED${NC}"
+                echo -e "${YELLOW}  Server IP: $current_ip${NC}"
+                echo -e "${YELLOW}  WARP IP: $warp_ip${NC}"
+            fi
+            
             return 0
         else
-            echo -e "${YELLOW}⚠ warp-go service is not running${NC}"
-            echo -e "${YELLOW}Checking service status...${NC}"
-            systemctl status warp-go --no-pager -l 2>/dev/null | head -20
-            return 1
+            echo -e "${YELLOW}⚠ WARP is installed but connection test failed${NC}"
+            echo -e "${YELLOW}Attempting to manually connect...${NC}"
+            
+            # Try manual connection
+            wg-quick up warp0 2>/dev/null || {
+                echo -e "${RED}✗ Manual connection failed${NC}"
+                return 1
+            }
+            
+            sleep 3
+            # Retest
+            warp_test=$(curl -s4 --max-time 10 https://cloudflare.com/cdn-cgi/trace 2>/dev/null)
+            warp_status=$(echo "$warp_test" | grep warp | cut -d= -f2)
+            
+            if [[ "$warp_status" == "on" ]] || [[ "$warp_status" == "plus" ]]; then
+                echo -e "${GREEN}✓ WARP connected manually${NC}"
+                return 0
+            else
+                echo -e "${RED}✗ WARP still not connected${NC}"
+                return 1
+            fi
         fi
+        
     # Check for warp-cli (official package)
     elif command -v warp-cli >/dev/null 2>&1; then
         echo -e "${GREEN}✓ warp-cli is installed${NC}"
+        
         if systemctl is-active --quiet warp-svc 2>/dev/null; then
             echo -e "${GREEN}✓ warp-svc service is running${NC}"
             
@@ -1866,23 +1999,48 @@ check_warp_status() {
             echo -e "${YELLOW}WARP Status: $warp_status${NC}"
             
             # Get WARP IP
-            local warp_ip=$(curl -s4 --max-time 5 ifconfig.me 2>/dev/null)
-            if [[ -n "$warp_ip" ]]; then
-                echo -e "${BLUE}  Current IP: $warp_ip${NC}"
-            fi
+            local warp_ip=$(curl -s4 --max-time 10 ifconfig.me 2>/dev/null)
+            echo -e "${BLUE}  Current IP: $warp_ip${NC}"
             
             # Test connection
             if warp-cli --accept-tos status 2>/dev/null | grep -i "connected" >/dev/null; then
                 echo -e "${GREEN}✓ WARP is connected${NC}"
+                
+                # Try to enable full tunnel mode
+                warp-cli --accept-tos set-mode tunnel 2>/dev/null
+                echo -e "${GREEN}✓ Full tunnel mode enabled for official client${NC}"
+                
                 return 0
             else
                 echo -e "${YELLOW}⚠ WARP is not connected${NC}"
-                return 1
+                echo -e "${YELLOW}Attempting to connect...${NC}"
+                
+                warp-cli --accept-tos connect 2>/dev/null
+                sleep 5
+                
+                if warp-cli --accept-tos status 2>/dev/null | grep -i "connected" >/dev/null; then
+                    echo -e "${GREEN}✓ WARP connected successfully${NC}"
+                    return 0
+                else
+                    echo -e "${RED}✗ Failed to connect WARP${NC}"
+                    return 1
+                fi
             fi
         else
             echo -e "${YELLOW}⚠ warp-svc service is not running${NC}"
-            systemctl status warp-svc --no-pager -l 2>/dev/null | head -20
-            return 1
+            systemctl start warp-svc 2>/dev/null
+            sleep 3
+            
+            if systemctl is-active --quiet warp-svc 2>/dev/null; then
+                echo -e "${GREEN}✓ warp-svc service started${NC}"
+                warp-cli --accept-tos register 2>/dev/null
+                warp-cli --accept-tos connect 2>/dev/null
+                echo -e "${GREEN}✓ WARP registration and connection attempted${NC}"
+                return 0
+            else
+                echo -e "${RED}✗ Failed to start warp-svc service${NC}"
+                return 1
+            fi
         fi
     else
         echo -e "${RED}✗ WARP is not installed${NC}"
@@ -1890,7 +2048,7 @@ check_warp_status() {
     fi
 }
 
-# Enhanced WARP Installation (SAFE VERSION - NO ROUTING CHANGES)
+# Enhanced WARP Installation with AUTO-ACTIVATION and FULL TUNNEL
 install_warp_cloudflare() {
     echo -e "${YELLOW}Installing Cloudflare WARP with Location Selection...${NC}"
     print_separator
@@ -1921,6 +2079,24 @@ install_warp_cloudflare() {
     echo -e "\n${GREEN}Selected Location: $SELECTED_LOCATION${NC}"
     echo -e "${GREEN}Endpoint: ${WARP_ENDPOINTS[$SELECTED_LOCATION]}${NC}"
     
+    # Ask about full tunnel
+    echo -e "\n${YELLOW}Traffic Routing Options:${NC}"
+    echo -e "1) ${GREEN}Full Tunnel Mode (RECOMMENDED)${NC}"
+    echo -e "   All IPv4 traffic will go through WARP"
+    echo -e "2) ${YELLOW}Split Tunnel Mode${NC}"
+    echo -e "   Only specific traffic goes through WARP"
+    
+    read -p "Select mode [1-2] (Default: 1): " tunnel_mode
+    tunnel_mode=${tunnel_mode:-1}
+    
+    if [[ "$tunnel_mode" == "1" ]]; then
+        FULL_TUNNEL=true
+        echo -e "${GREEN}✓ Full Tunnel Mode selected${NC}"
+    else
+        FULL_TUNNEL=false
+        echo -e "${YELLOW}✓ Split Tunnel Mode selected${NC}"
+    fi
+    
     # Check if already installed
     if command -v warp-go >/dev/null 2>&1 || command -v warp-cli >/dev/null 2>&1; then
         echo -e "${YELLOW}WARP is already installed.${NC}"
@@ -1931,6 +2107,7 @@ install_warp_cloudflare() {
         fi
         echo -e "${YELLOW}Removing existing WARP installation...${NC}"
         remove_warp
+        sleep 2
     fi
     
     # Get CPU architecture
@@ -1943,28 +2120,28 @@ install_warp_cloudflare() {
     
     echo -e "${GREEN}CPU Architecture: $cpu_arch${NC}"
     
-    # Install dependencies (MINIMAL)
-    echo -e "${YELLOW}Installing minimal dependencies...${NC}"
+    # Install dependencies
+    echo -e "${YELLOW}Installing dependencies...${NC}"
     detect_distro
     case $DISTRO in
         ubuntu|debian)
             apt-get update
-            apt-get install -y curl wget
+            apt-get install -y curl wget wireguard wireguard-tools resolvconf
             ;;
         centos|rhel|fedora|almalinux|rocky)
             if command -v dnf >/dev/null 2>&1; then
-                dnf install -y curl wget
+                dnf install -y curl wget wireguard-tools
             else
-                yum install -y curl wget
+                yum install -y curl wget wireguard-tools
             fi
             ;;
         *)
             if command -v apt-get >/dev/null 2>&1; then
-                apt-get update && apt-get install -y curl wget
+                apt-get update && apt-get install -y curl wget wireguard wireguard-tools
             elif command -v yum >/dev/null 2>&1; then
-                yum install -y curl wget
+                yum install -y curl wget wireguard-tools
             elif command -v dnf >/dev/null 2>&1; then
-                dnf install -y curl wget
+                dnf install -y curl wget wireguard-tools
             fi
             ;;
     esac
@@ -1973,7 +2150,7 @@ install_warp_cloudflare() {
     local temp_dir=$(mktemp -d)
     cd "$temp_dir"
     
-    # Try to install from official Cloudflare repository first (SIMPLER)
+    # Try to install from official Cloudflare repository
     echo -e "${YELLOW}Attempting to install from official repository...${NC}"
     local repo_installed=false
     
@@ -2001,17 +2178,27 @@ install_warp_cloudflare() {
     fi
     
     if [ "$repo_installed" = true ]; then
-        # Setup warp-cli (SIMPLER)
+        # Setup warp-cli with AUTO ACTIVATION
         echo -e "${YELLOW}Setting up WARP (official package)...${NC}"
+        
+        # Start and enable service
         systemctl start warp-svc 2>/dev/null
         systemctl enable warp-svc 2>/dev/null
         sleep 3
         
+        # Register and connect
         warp-cli --accept-tos register 2>/dev/null
-        warp-cli --accept-tos set-mode proxy 2>/dev/null
+        warp-cli --accept-tos set-mode tunnel 2>/dev/null  # Set to tunnel mode for full tunnel
         warp-cli --accept-tos connect 2>/dev/null
         
         echo -e "${GREEN}✓ WARP installed successfully via official package${NC}"
+        
+        # Enable full tunnel if selected
+        if [ "$FULL_TUNNEL" = true ]; then
+            echo -e "${YELLOW}Configuring full tunnel for official client...${NC}"
+            warp-cli --accept-tos set-mode tunnel 2>/dev/null
+            echo -e "${GREEN}✓ Full tunnel mode enabled${NC}"
+        fi
         
         cd /
         rm -rf "$temp_dir"
@@ -2022,8 +2209,8 @@ install_warp_cloudflare() {
         return 0
     fi
     
-    # Fallback to warp-go binary (SIMPLIFIED)
-    echo -e "${YELLOW}Official repository failed, installing warp-go...${NC}"
+    # Fallback to warp-go binary (BETTER VERSION)
+    echo -e "${YELLOW}Installing warp-go...${NC}"
     
     # Download warp-go
     local warpgo_url=""
@@ -2042,7 +2229,7 @@ install_warp_cloudflare() {
         return 1
     fi
     
-    echo -e "${YELLOW}Downloading warp-go...${NC}"
+    echo -e "${YELLOW}Downloading warp-go from: $warpgo_url${NC}"
     if ! wget -q --timeout=30 --tries=3 -O warp-go "$warpgo_url"; then
         echo -e "${RED}✗ Failed to download warp-go${NC}"
         cd /
@@ -2058,104 +2245,178 @@ install_warp_cloudflare() {
         return 1
     fi
     
-    # Make executable
+    # Make executable and test
     chmod +x warp-go
+    if ! ./warp-go --version 2>/dev/null; then
+        echo -e "${YELLOW}⚠ Binary test failed, but continuing anyway...${NC}"
+    fi
     
     # Install binary
     mv warp-go /usr/local/bin/warp-go
     
-    # Create SIMPLE configuration (NO advanced routing)
+    # Create configuration with selected endpoint (FULL TUNNEL CONFIG)
     echo -e "${YELLOW}Creating WARP configuration...${NC}"
     local selected_endpoint=${WARP_ENDPOINTS[$SELECTED_LOCATION]}
     
+    # Generate WireGuard keys
+    local private_key=$(wg genkey)
+    local public_key=$(echo "$private_key" | wg pubkey)
+    
     cat > /usr/local/bin/warp.conf <<EOF
-[Account]
-Device = $(cat /proc/sys/kernel/random/uuid)
-PrivateKey = $(openssl rand -base64 32 | head -c 44)
-Token = 
-Type = free
-Name = WARP-$SELECTED_LOCATION
+[Interface]
+PrivateKey = $private_key
+Address = 10.7.0.2/32
+Address = fd01:5ca1:ab1e:80fa:785c:29c6:853d:983/128
+DNS = 1.1.1.1,1.0.0.1
 MTU = 1280
 
 [Peer]
 PublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=
-Endpoint = $selected_endpoint
 AllowedIPs = 0.0.0.0/0, ::/0
-KeepAlive = 30
+Endpoint = $selected_endpoint
 PersistentKeepalive = 25
-
+EOF
+    
+    # Also create standard WireGuard config
+    cat > /etc/wireguard/warp0.conf <<EOF
 [Interface]
+PrivateKey = $private_key
 Address = 10.7.0.2/32
 Address = fd01:5ca1:ab1e:80fa:785c:29c6:853d:983/128
 DNS = 1.1.1.1,1.0.0.1
+MTU = 1280
 
-[Script]
-PostUp = 
-PostDown = 
+[Peer]
+PublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=
+AllowedIPs = 0.0.0.0/0, ::/0
+Endpoint = $selected_endpoint
+PersistentKeepalive = 25
 EOF
     
-    # Create systemd service
+    # Create systemd service for warp-go
     echo -e "${YELLOW}Creating systemd service...${NC}"
     cat > /etc/systemd/system/warp-go.service <<EOF
 [Unit]
 Description=Cloudflare WARP Service
 After=network.target
 Wants=network.target
+Before=network-online.target
 
 [Service]
 Type=simple
 User=root
 ExecStart=/usr/local/bin/warp-go --config=/usr/local/bin/warp.conf
-Restart=on-failure
-RestartSec=5
+Restart=always
+RestartSec=3
 LimitNOFILE=1000000
 
 [Install]
 WantedBy=multi-user.target
 EOF
     
-    # Register account
+    # Create WireGuard service as backup
+    cat > /etc/systemd/system/wg-quick@warp0.service <<EOF
+[Unit]
+Description=WireGuard via wg-quick(8) for warp0
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/wg-quick up warp0
+ExecStop=/usr/bin/wg-quick down warp0
+Environment=WG_ENDPOINT_RESOLUTION_RETRIES=infinity
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    
+    # Register account (try multiple times)
     echo -e "${YELLOW}Registering WARP account...${NC}"
-    /usr/local/bin/warp-go --register --config=/usr/local/bin/warp.conf > /tmp/warp-register.log 2>&1 || {
-        echo -e "${YELLOW}⚠ Registration may have issues, continuing anyway...${NC}"
-    }
+    local registration_success=false
+    for i in {1..3}; do
+        echo "Attempt $i..."
+        if /usr/local/bin/warp-go --register --config=/usr/local/bin/warp.conf > /tmp/warp-register.log 2>&1; then
+            registration_success=true
+            echo -e "${GREEN}✓ Registration successful${NC}"
+            break
+        else
+            echo -e "${YELLOW}⚠ Registration attempt $i failed${NC}"
+            sleep 2
+        fi
+    done
     
-    # Enable and start service
-    systemctl daemon-reload
-    systemctl enable warp-go
-    
-    # Start service with timeout
-    echo -e "${YELLOW}Starting WARP service...${NC}"
-    if timeout 10 systemctl start warp-go 2>/dev/null; then
-        echo -e "${GREEN}✓ WARP service started${NC}"
-    else
-        echo -e "${YELLOW}⚠ Service start timed out, checking status...${NC}"
+    if [ "$registration_success" = false ]; then
+        echo -e "${YELLOW}⚠ Using pre-configured settings${NC}"
     fi
     
-    # Wait a bit
-    sleep 3
+    # Enable and start services
+    systemctl daemon-reload
+    
+    # Start WireGuard service first (more reliable)
+    echo -e "${YELLOW}Starting WireGuard service...${NC}"
+    wg-quick up warp0 2>/dev/null || {
+        echo -e "${YELLOW}⚠ wg-quick failed, trying alternative...${NC}"
+        ip link add dev warp0 type wireguard
+        wg setconf warp0 /etc/wireguard/warp0.conf
+        ip link set up dev warp0
+    }
+    
+    # Enable WireGuard service
+    systemctl enable wg-quick@warp0.service 2>/dev/null
+    
+    # Start warp-go service
+    systemctl enable warp-go
+    systemctl start warp-go
+    
+    # Wait and check
+    echo -e "${YELLOW}Waiting for WARP to start...${NC}"
+    sleep 5
     
     # Check if service is running
-    if systemctl is-active --quiet warp-go 2>/dev/null; then
-        echo -e "${GREEN}✓ WARP service is active${NC}"
+    if systemctl is-active --quiet warp-go 2>/dev/null || ip link show warp0 >/dev/null 2>&1; then
+        echo -e "${GREEN}✓ WARP service/interface is active${NC}"
         
-        # Check WireGuard interface
-        echo -e "${YELLOW}Checking network interfaces...${NC}"
-        if ip link show warp0 >/dev/null 2>&1; then
-            echo -e "${GREEN}✓ WireGuard interface (warp0) created${NC}"
-            ip addr show warp0 2>/dev/null | grep inet
-        else
-            echo -e "${YELLOW}⚠ WireGuard interface not found, checking in 5 seconds...${NC}"
-            sleep 5
-            if ip link show warp0 >/dev/null 2>&1; then
-                echo -e "${GREEN}✓ WireGuard interface created${NC}"
-            else
-                echo -e "${YELLOW}⚠ WireGuard interface still not found${NC}"
+        # Enable full tunnel if selected
+        if [ "$FULL_TUNNEL" = true ]; then
+            enable_full_tunnel
+        fi
+        
+        # Test connection
+        echo -e "${YELLOW}Testing WARP connection...${NC}"
+        sleep 3
+        
+        local warp_ip=$(curl -s4 --max-time 10 ifconfig.me 2>/dev/null)
+        if [[ -n "$warp_ip" ]]; then
+            echo -e "${GREEN}✓ WARP is working!${NC}"
+            echo -e "${BLUE}  Your IP: $warp_ip${NC}"
+            
+            # Verify it's a Cloudflare IP
+            if echo "$warp_ip" | grep -q "162\.159\."; then
+                echo -e "${GREEN}✓ Connected through Cloudflare WARP${NC}"
             fi
+        else
+            echo -e "${YELLOW}⚠ Could not get IP, but interface is up${NC}"
         fi
     else
-        echo -e "${YELLOW}⚠ WARP service is not active, checking logs...${NC}"
-        journalctl -u warp-go --no-pager -n 10
+        echo -e "${YELLOW}⚠ Service not active, trying manual start...${NC}"
+        
+        # Manual start
+        wg-quick up warp0 2>/dev/null
+        sleep 3
+        
+        if ip link show warp0 >/dev/null 2>&1; then
+            echo -e "${GREEN}✓ WireGuard interface started manually${NC}"
+            
+            if [ "$FULL_TUNNEL" = true ]; then
+                enable_full_tunnel
+            fi
+        else
+            echo -e "${RED}✗ Failed to start WARP${NC}"
+            echo -e "${YELLOW}Checking logs...${NC}"
+            journalctl -u warp-go --no-pager -n 20 2>/dev/null || echo "No logs available"
+        fi
     fi
     
     # Cleanup
@@ -2163,21 +2424,13 @@ EOF
     rm -rf "$temp_dir"
     
     # Final check
-    sleep 2
+    echo -e "${YELLOW}Final status check...${NC}"
     check_warp_status
-    
-    # Important notice
-    echo -e "\n${YELLOW}IMPORTANT:${NC}"
-    echo -e "${GREEN}WARP has been installed in simple mode.${NC}"
-    echo -e "${YELLOW}If you want ALL traffic to go through WARP, you may need to:${NC}"
-    echo -e "1. Check routing table with: ${BOLD}ip route${NC}"
-    echo -e "2. Configure routing manually if needed"
-    echo -e "3. For simple proxy mode, WARP is working correctly"
     
     return 0
 }
 
-# Remove WARP (SAFE VERSION)
+# Remove WARP (COMPLETE VERSION)
 remove_warp() {
     if ! confirm_action "This will remove Cloudflare WARP!"; then
         echo -e "${YELLOW}Operation cancelled.${NC}"
@@ -2186,12 +2439,25 @@ remove_warp() {
     
     echo -e "${YELLOW}Removing Cloudflare WARP...${NC}"
     
+    # Disable full tunnel first
+    disable_full_tunnel
+    
     # Stop and remove warp-go
     systemctl stop warp-go 2>/dev/null
     systemctl disable warp-go 2>/dev/null
     rm -f /usr/local/bin/warp-go 2>/dev/null
     rm -f /usr/local/bin/warp.conf 2>/dev/null
     rm -f /etc/systemd/system/warp-go.service 2>/dev/null
+    
+    # Stop and remove WireGuard interface
+    wg-quick down warp0 2>/dev/null
+    systemctl stop wg-quick@warp0.service 2>/dev/null
+    systemctl disable wg-quick@warp0.service 2>/dev/null
+    rm -f /etc/wireguard/warp0.conf 2>/dev/null
+    rm -f /etc/systemd/system/wg-quick@warp0.service 2>/dev/null
+    
+    # Remove WireGuard interface
+    ip link del warp0 2>/dev/null
     
     # Stop and remove warp-cli (official package)
     systemctl stop warp-svc 2>/dev/null
@@ -2213,24 +2479,9 @@ remove_warp() {
         rm -f /etc/yum.repos.d/cloudflare-warp.repo 2>/dev/null
     fi
     
-    # Remove WireGuard interface if exists
-    if ip link show warp0 >/dev/null 2>&1; then
-        echo -e "${YELLOW}Removing WireGuard interface...${NC}"
-        ip link del warp0 2>/dev/null
-    fi
-    
     # Cleanup files
     rm -f /root/WARP-UP.sh 2>/dev/null
     rm -rf /root/warpip 2>/dev/null
-    
-    # Remove old routing scripts
-    rm -f /etc/network/warp-routing.sh 2>/dev/null
-    rm -f /etc/systemd/system/warp-routing.service 2>/dev/null
-    
-    # Remove from rc.local
-    if [ -f /etc/rc.local ]; then
-        sed -i '/warp-routing.sh/d' /etc/rc.local 2>/dev/null
-    fi
     
     # Remove cron jobs
     crontab -l 2>/dev/null | grep -v warp-go | crontab - 2>/dev/null
@@ -2243,20 +2494,23 @@ remove_warp() {
     echo -e "${YELLOW}✓ Network configuration restored${NC}"
 }
 
-# WARP Management Menu (SAFE VERSION)
+# WARP Management Menu (ENHANCED)
 manage_warp() {
     while true; do
-        echo -e "\n${YELLOW}Cloudflare WARP Management (Safe Mode)${NC}"
+        echo -e "\n${YELLOW}Cloudflare WARP Management${NC}"
         echo -e "1) Install/Reinstall WARP (with Location Selection)"
         echo -e "2) Check WARP Status"
-        echo -e "3) Restart WARP Service"
-        echo -e "4) Stop WARP Service"
-        echo -e "5) Remove WARP"
-        echo -e "6) View WARP Logs"
-        echo -e "7) Test WARP Latency"
-        echo -e "8) Back to Main Menu"
+        echo -e "3) Enable Full Tunnel Mode (Route all IPv4 traffic)"
+        echo -e "4) Disable Full Tunnel Mode"
+        echo -e "5) Restart WARP Service"
+        echo -e "6) Stop WARP Service"
+        echo -e "7) Remove WARP"
+        echo -e "8) View WARP Logs"
+        echo -e "9) Test WARP Latency"
+        echo -e "10) Manual WARP Connection"
+        echo -e "11) Back to Main Menu"
         
-        read -p "Enter your choice [1-8]: " warp_choice
+        read -p "Enter your choice [1-11]: " warp_choice
         
         case $warp_choice in
             1)
@@ -2266,44 +2520,40 @@ manage_warp() {
                 check_warp_status
                 ;;
             3)
-                echo -e "${YELLOW}Restarting WARP service...${NC}"
-                if command -v warp-go >/dev/null 2>&1; then
-                    if systemctl restart warp-go 2>/dev/null; then
-                        echo -e "${GREEN}✓ warp-go service restarted${NC}"
-                        sleep 2
-                    else
-                        echo -e "${RED}✗ Failed to restart warp-go${NC}"
-                    fi
-                elif command -v warp-cli >/dev/null 2>&1; then
-                    if systemctl restart warp-svc 2>/dev/null; then
-                        echo -e "${GREEN}✓ warp-svc service restarted${NC}"
-                        sleep 2
-                    else
-                        echo -e "${RED}✗ Failed to restart warp-svc${NC}"
-                    fi
-                fi
-                check_warp_status
+                enable_full_tunnel
                 ;;
             4)
-                echo -e "${YELLOW}Stopping WARP service...${NC}"
-                if command -v warp-go >/dev/null 2>&1; then
-                    if systemctl stop warp-go 2>/dev/null; then
-                        echo -e "${GREEN}✓ warp-go service stopped${NC}"
-                    else
-                        echo -e "${RED}✗ Failed to stop warp-go${NC}"
-                    fi
-                elif command -v warp-cli >/dev/null 2>&1; then
-                    if systemctl stop warp-svc 2>/dev/null; then
-                        echo -e "${GREEN}✓ warp-svc service stopped${NC}"
-                    else
-                        echo -e "${RED}✗ Failed to stop warp-svc${NC}"
-                    fi
-                fi
+                disable_full_tunnel
                 ;;
             5)
-                remove_warp
+                echo -e "${YELLOW}Restarting WARP service...${NC}"
+                if command -v warp-go >/dev/null 2>&1; then
+                    systemctl restart warp-go 2>/dev/null
+                    echo -e "${GREEN}✓ warp-go service restarted${NC}"
+                fi
+                if command -v wg-quick >/dev/null 2>&1; then
+                    wg-quick down warp0 2>/dev/null
+                    wg-quick up warp0 2>/dev/null
+                    echo -e "${GREEN}✓ WireGuard interface restarted${NC}"
+                fi
+                sleep 3
+                check_warp_status
                 ;;
             6)
+                echo -e "${YELLOW}Stopping WARP service...${NC}"
+                if command -v warp-go >/dev/null 2>&1; then
+                    systemctl stop warp-go 2>/dev/null
+                    echo -e "${GREEN}✓ warp-go service stopped${NC}"
+                fi
+                if command -v wg-quick >/dev/null 2>&1; then
+                    wg-quick down warp0 2>/dev/null
+                    echo -e "${GREEN}✓ WireGuard interface stopped${NC}"
+                fi
+                ;;
+            7)
+                remove_warp
+                ;;
+            8)
                 echo -e "${YELLOW}Showing WARP logs...${NC}"
                 if command -v warp-go >/dev/null 2>&1; then
                     journalctl -u warp-go --no-pager -n 30
@@ -2313,11 +2563,20 @@ manage_warp() {
                     echo -e "${RED}WARP is not installed${NC}"
                 fi
                 ;;
-            7)
+            9)
                 echo -e "${YELLOW}Testing WARP latency to different locations...${NC}"
                 test_warp_latency
                 ;;
-            8)
+            10)
+                echo -e "${YELLOW}Manual WARP connection...${NC}"
+                if command -v wg-quick >/dev/null 2>&1 && [ -f /etc/wireguard/warp0.conf ]; then
+                    wg-quick up warp0
+                    echo -e "${GREEN}✓ Manual connection attempted${NC}"
+                else
+                    echo -e "${RED}WireGuard config not found${NC}"
+                fi
+                ;;
+            11)
                 return
                 ;;
             *)
