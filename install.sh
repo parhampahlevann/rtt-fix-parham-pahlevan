@@ -2,7 +2,7 @@
 
 # Global Configuration
 SCRIPT_NAME="Ultimate Network Optimizer"
-SCRIPT_VERSION="9.3"  # Enhanced with TCP MUX and Tunnel features
+SCRIPT_VERSION="9.4"  # Added WARP Cloudflare support
 AUTHOR="Parham Pahlevan"
 CONFIG_FILE="/etc/network_optimizer.conf"
 LOG_FILE="/var/log/network_optimizer.log"
@@ -137,7 +137,7 @@ show_header() {
     if [ "$icmp_status" == "DROP" ]; then
         echo -e "${YELLOW}ICMP Ping: ${RED}Blocked${NC}"
     else
-        echo -e "${YELLOW}ICMP Ping: ${GREEN}Allowed${NC}"
+        echo -e "${YELLow}ICMP Ping: ${GREEN}Allowed${NC}"
     fi
 
     # Show IPv6 Status
@@ -151,6 +151,24 @@ show_header() {
     # Show VXLAN Tunnel Status
     if ip link show vxlan100 >/dev/null 2>&1; then
         echo -e "${YELLOW}VXLAN Tunnel: ${GREEN}Active${NC}"
+    fi
+    
+    # Show HAProxy Status
+    if command -v haproxy >/dev/null 2>&1; then
+        if systemctl is-active --quiet haproxy 2>/dev/null; then
+            echo -e "${YELLOW}HAProxy: ${GREEN}Active${NC}"
+        else
+            echo -e "${YELLOW}HAProxy: ${YELLOW}Installed (Not running)${NC}"
+        fi
+    fi
+    
+    # Show WARP Status
+    if command -v warp-go >/dev/null 2>&1; then
+        if systemctl is-active --quiet warp-go 2>/dev/null; then
+            echo -e "${YELLOW}Cloudflare WARP: ${GREEN}Active${NC}"
+        else
+            echo -e "${YELLOW}Cloudflare WARP: ${YELLOW}Installed (Not running)${NC}"
+        fi
     fi
     echo
 }
@@ -944,12 +962,14 @@ self_update() {
     echo -e "Author: ${BOLD}$AUTHOR${NC}"
     echo ""
     echo -e "${YELLOW}Update Information:${NC}"
-    echo -e "• New features in v9.3:"
+    echo -e "• New features in v9.4:"
     echo -e "  ✓ TCP MUX Configuration"
     echo -e "  ✓ VXLAN Tunnel Setup"
     echo -e "  ✓ Best MTU Auto-detection"
     echo -e "  ✓ Reboot functionality"
     echo -e "  ✓ Tunnel management"
+    echo -e "  ✓ HAProxy Installation"
+    echo -e "  ✓ Cloudflare WARP Installation"
     echo ""
     echo -e "${GREEN}This is the latest version!${NC}"
     echo -e "${YELLOW}For future updates, check the GitHub repository.${NC}"
@@ -1472,6 +1492,571 @@ delete_vxlan_tunnel() {
     echo -e "${GREEN}✓ All VXLAN tunnels and configurations have been removed!${NC}"
 }
 
+# HAProxy Installation and Configuration (گزینه 21)
+install_haproxy_all_ports() {
+    echo -e "${YELLOW}Installing HAProxy and configuring all ports...${NC}"
+    print_separator
+    
+    # Check if HAProxy is already installed
+    if command -v haproxy >/dev/null 2>&1; then
+        echo -e "${GREEN}HAProxy is already installed.${NC}"
+    else
+        echo -e "${BLUE}Installing HAProxy...${NC}"
+        
+        # Detect package manager and install HAProxy
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get update
+            apt-get install haproxy -y
+        elif command -v yum >/dev/null 2>&1; then
+            yum install haproxy -y
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf install haproxy -y
+        elif command -v pacman >/dev/null 2>&1; then
+            pacman -S haproxy --noconfirm
+        else
+            echo -e "${RED}Could not detect package manager!${NC}"
+            return 1
+        fi
+        
+        if ! command -v haproxy >/dev/null 2>&1; then
+            echo -e "${RED}Failed to install HAProxy!${NC}"
+            return 1
+        fi
+        
+        echo -e "${GREEN}HAProxy installed successfully.${NC}"
+    fi
+    
+    # Backup existing configuration
+    if [ -f "/etc/haproxy/haproxy.cfg" ]; then
+        cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.backup.$(date +%Y%m%d_%H%M%S)
+        echo -e "${GREEN}Backup of existing configuration created.${NC}"
+    fi
+    
+    # Add configuration to the END of haproxy.cfg
+    echo -e "${BLUE}Configuring HAProxy with all ports...${NC}"
+    
+    # Check if haproxy.cfg exists, if not create it with basic configuration
+    if [ ! -f "/etc/haproxy/haproxy.cfg" ]; then
+        cat > /etc/haproxy/haproxy.cfg <<EOF
+global
+    log /dev/log local0
+    log /dev/log local1 notice
+    chroot /var/lib/haproxy
+    stats socket /run/haproxy/admin.sock mode 660 level admin expose-fd listeners
+    stats timeout 30s
+    user haproxy
+    group haproxy
+    daemon
+
+defaults
+    log global
+    mode tcp
+    option tcplog
+    option dontlognull
+    timeout connect 5000
+    timeout client 50000
+    timeout server 50000
+    errorfile 400 /etc/haproxy/errors/400.http
+    errorfile 403 /etc/haproxy/errors/403.http
+    errorfile 408 /etc/haproxy/errors/408.http
+    errorfile 500 /etc/haproxy/errors/500.http
+    errorfile 502 /etc/haproxy/errors/502.http
+    errorfile 503 /etc/haproxy/errors/503.http
+    errorfile 504 /etc/haproxy/errors/504.http
+
+EOF
+    fi
+    
+    # Append the port configurations to haproxy.cfg
+    cat >> /etc/haproxy/haproxy.cfg <<EOF
+
+# =============================================
+# Port configurations added by $SCRIPT_NAME
+# Date: $(date)
+# =============================================
+
+frontend de
+    bind :::443
+    mode tcp
+    default_backend de
+backend de
+    mode tcp
+    balance roundrobin
+    server myloc 10.123.1.2:443
+
+frontend de2
+    bind :::23902
+    mode tcp
+    default_backend de2
+backend de2
+    mode tcp
+    balance roundrobin
+    server myloc 10.123.1.2:23902
+
+frontend de3
+    bind :::8081
+    mode tcp
+    default_backend de3
+backend de3
+    mode tcp
+    balance roundrobin
+    server myloc 10.123.1.2:8081
+
+frontend de4
+    bind :::8080
+    mode tcp
+    default_backend de4
+backend de4
+    mode tcp
+    balance roundrobin
+    server myloc 10.123.1.2:8080
+
+frontend de5
+    bind :::80
+    mode tcp
+    default_backend de5
+backend de5
+    mode tcp
+    balance roundrobin
+    server myloc 10.123.1.2:80
+
+frontend de6
+    bind :::8443
+    mode tcp
+    default_backend de6
+backend de6
+    mode tcp
+    balance roundrobin
+    server myloc 10.123.1.2:8443
+
+frontend de7
+    bind :::1080
+    mode tcp
+    default_backend de7
+backend de7
+    mode tcp
+    balance roundrobin
+    server myloc 10.123.1.2:1080
+EOF
+    
+    echo -e "${GREEN}HAProxy configuration updated successfully.${NC}"
+    
+    # Validate configuration
+    echo -e "${YELLOW}Validating HAProxy configuration...${NC}"
+    if haproxy -c -f /etc/haproxy/haproxy.cfg; then
+        echo -e "${GREEN}✓ HAProxy configuration is valid.${NC}"
+    else
+        echo -e "${RED}✗ HAProxy configuration has errors!${NC}"
+        echo -e "${YELLOW}Please check the configuration manually.${NC}"
+        return 1
+    fi
+    
+    # Restart HAProxy service
+    echo -e "${YELLOW}Restarting HAProxy service...${NC}"
+    
+    # Try different service management commands
+    if systemctl restart haproxy 2>/dev/null; then
+        echo -e "${GREEN}✓ HAProxy service restarted successfully.${NC}"
+    elif service haproxy restart 2>/dev/null; then
+        echo -e "${GREEN}✓ HAProxy service restarted successfully.${NC}"
+    elif /etc/init.d/haproxy restart 2>/dev/null; then
+        echo -e "${GREEN}✓ HAProxy service restarted successfully.${NC}"
+    else
+        echo -e "${YELLOW}Could not restart HAProxy service. Starting it instead...${NC}"
+        if systemctl start haproxy 2>/dev/null || service haproxy start 2>/dev/null || /etc/init.d/haproxy start 2>/dev/null; then
+            echo -e "${GREEN}✓ HAProxy service started successfully.${NC}"
+        else
+            echo -e "${RED}✗ Could not start HAProxy service!${NC}"
+            echo -e "${YELLOW}Please start it manually.${NC}"
+        fi
+    fi
+    
+    # Enable HAProxy to start on boot
+    if systemctl enable haproxy 2>/dev/null; then
+        echo -e "${GREEN}✓ HAProxy enabled to start on boot.${NC}"
+    fi
+    
+    # Show status
+    echo -e "\n${YELLOW}HAProxy Status:${NC}"
+    if systemctl is-active --quiet haproxy 2>/dev/null; then
+        echo -e "${GREEN}✓ HAProxy is running.${NC}"
+    else
+        echo -e "${YELLOW}⚠ HAProxy is not running.${NC}"
+    fi
+    
+    # Show configured ports
+    echo -e "\n${YELLOW}Configured Ports:${NC}"
+    echo -e "443 (HTTPS)     → 10.123.1.2:443"
+    echo -e "23902           → 10.123.1.2:23902"
+    echo -e "8081            → 10.123.1.2:8081"
+    echo -e "8080 (HTTP Alt) → 10.123.1.2:8080"
+    echo -e "80 (HTTP)       → 10.123.1.2:80"
+    echo -e "8443 (HTTPS Alt)→ 10.123.1.2:8443"
+    echo -e "1080 (SOCKS)    → 10.123.1.2:1080"
+    
+    print_separator
+    echo -e "${GREEN}✅ HAProxy installation and configuration completed!${NC}"
+    echo -e "${YELLOW}Configuration file: /etc/haproxy/haproxy.cfg${NC}"
+    echo -e "${YELLOW}Backup file: /etc/haproxy/haproxy.cfg.backup.*${NC}"
+}
+
+# ============================================================================
+# WARP CLOUDFLARE INSTALLATION (گزینه 23)
+# ============================================================================
+
+# WARP Helper Functions
+reswarp(){
+    unreswarp
+    crontab -l > /tmp/crontab.tmp 2>/dev/null || echo "" > /tmp/crontab.tmp
+    echo "0 4 * * * systemctl stop warp-go;systemctl restart warp-go;systemctl restart wg-quick@wgcf;systemctl restart warp-svc" >> /tmp/crontab.tmp
+    echo "@reboot screen -UdmS up /bin/bash /root/WARP-UP.sh" >> /tmp/crontab.tmp
+    echo "0 0 * * * rm -f /root/warpip/warp_log.txt" >> /tmp/crontab.tmp
+    crontab /tmp/crontab.tmp
+    rm /tmp/crontab.tmp
+    echo -e "${GREEN}✓ WARP cron jobs configured${NC}"
+}
+
+unreswarp(){
+    crontab -l > /tmp/crontab.tmp 2>/dev/null || echo "" > /tmp/crontab.tmp
+    sed -i '/systemctl stop warp-go;systemctl restart warp-go;systemctl restart wg-quick@wgcf;systemctl restart warp-svc/d' /tmp/crontab.tmp
+    sed -i '/@reboot screen/d' /tmp/crontab.tmp
+    sed -i '/warp_log.txt/d' /tmp/crontab.tmp
+    crontab /tmp/crontab.tmp
+    rm /tmp/crontab.tmp
+}
+
+# Get CPU architecture
+get_cpu_arch() {
+    local arch=$(uname -m)
+    case $arch in
+        x86_64|amd64)
+            echo "amd64"
+            ;;
+        aarch64|arm64)
+            echo "arm64"
+            ;;
+        armv7l|armhf)
+            echo "armv7"
+            ;;
+        *)
+            echo "unsupported"
+            ;;
+    esac
+}
+
+# Check WARP status
+check_warp_status() {
+    if command -v warp-go >/dev/null 2>&1 && systemctl is-active --quiet warp-go 2>/dev/null; then
+        # Check IPv4
+        local v4_status=$(curl -s4 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep warp | cut -d= -f2)
+        # Check IPv6
+        local v6_status=$(curl -s6 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep warp | cut -d= -f2)
+        
+        if [[ "$v4_status" == "on" ]] || [[ "$v4_status" == "plus" ]]; then
+            echo -e "${GREEN}✓ WARP IPv4: Active${NC}"
+        else
+            echo -e "${YELLOW}⚠ WARP IPv4: Not active${NC}"
+        fi
+        
+        if [[ "$v6_status" == "on" ]] || [[ "$v6_status" == "plus" ]]; then
+            echo -e "${GREEN}✓ WARP IPv6: Active${NC}"
+        else
+            echo -e "${YELLOW}⚠ WARP IPv6: Not active${NC}"
+        fi
+        
+        # Get WARP IPs
+        local warp_ipv4=$(curl -s4 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep ip= | cut -d= -f2)
+        local warp_ipv6=$(curl -s6 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep ip= | cut -d= -f2)
+        
+        if [ -n "$warp_ipv4" ]; then
+            echo -e "${BLUE}WARP IPv4: $warp_ipv4${NC}"
+        fi
+        if [ -n "$warp_ipv6" ]; then
+            echo -e "${BLUE}WARP IPv6: $warp_ipv6${NC}"
+        fi
+        
+        return 0
+    else
+        echo -e "${RED}✗ WARP is not installed or not running${NC}"
+        return 1
+    fi
+}
+
+# Install WARP-GO
+install_warp_cloudflare() {
+    echo -e "${YELLOW}Installing Cloudflare WARP...${NC}"
+    print_separator
+    
+    # Check if already installed
+    if command -v warp-go >/dev/null 2>&1; then
+        echo -e "${YELLOW}WARP is already installed. Checking status...${NC}"
+        check_warp_status
+        read -p "Do you want to reinstall? (yes/no): " reinstall
+        if [[ "$reinstall" != "yes" ]] && [[ "$reinstall" != "y" ]]; then
+            return
+        fi
+        echo -e "${YELLOW}Removing existing WARP installation...${NC}"
+        systemctl stop warp-go 2>/dev/null
+        systemctl disable warp-go 2>/dev/null
+        rm -f /usr/local/bin/warp-go
+        rm -f /usr/local/bin/warp.conf
+        rm -f /lib/systemd/system/warp-go.service
+    fi
+    
+    # Detect OS and install dependencies
+    detect_distro
+    echo -e "${BLUE}Detected OS: $DISTRO $DISTRO_VERSION${NC}"
+    
+    # Install dependencies
+    echo -e "${YELLOW}Installing dependencies...${NC}"
+    case $DISTRO in
+        ubuntu|debian)
+            apt-get update
+            apt-get install -y curl wget screen iproute2 openresolv dnsutils iputils-ping
+            ;;
+        centos|rhel|fedora)
+            if command -v dnf >/dev/null 2>&1; then
+                dnf install -y curl wget screen iproute
+            else
+                yum install -y curl wget screen iproute
+            fi
+            ;;
+        *)
+            echo -e "${YELLOW}Unknown distribution, trying to install common dependencies...${NC}"
+            if command -v apt-get >/dev/null 2>&1; then
+                apt-get update && apt-get install -y curl wget screen iproute2
+            elif command -v yum >/dev/null 2>&1; then
+                yum install -y curl wget screen iproute
+            fi
+            ;;
+    esac
+    
+    # Get CPU architecture
+    local cpu_arch=$(get_cpu_arch)
+    if [[ "$cpu_arch" == "unsupported" ]]; then
+        echo -e "${RED}Unsupported CPU architecture: $(uname -m)${NC}"
+        return 1
+    fi
+    
+    echo -e "${GREEN}CPU Architecture: $cpu_arch${NC}"
+    
+    # Download and install warp-go
+    echo -e "${YELLOW}Downloading WARP-GO...${NC}"
+    local warp_url="https://gitlab.com/rwkgyg/CFwarp/-/raw/main/warp-go_1.0.8_linux_${cpu_arch}"
+    
+    if ! wget -q --timeout=10 --tries=3 -O /usr/local/bin/warp-go "$warp_url"; then
+        echo -e "${RED}Failed to download WARP-GO!${NC}"
+        return 1
+    fi
+    
+    chmod +x /usr/local/bin/warp-go
+    
+    # Create warp.conf with free account
+    echo -e "${YELLOW}Creating WARP configuration...${NC}"
+    
+    # Generate random device ID and private key
+    local device_id=$(cat /proc/sys/kernel/random/uuid)
+    local private_key=$(openssl rand -base64 32 2>/dev/null || head -c 32 /dev/urandom | base64)
+    
+    cat > /usr/local/bin/warp.conf <<EOF
+[Account]
+Device = $device_id
+PrivateKey = $private_key
+Token = 
+Type = free
+Name = WARP
+MTU = 1280
+
+[Peer]
+PublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=
+Endpoint = 162.159.192.1:2408
+AllowedIPs = 0.0.0.0/0, ::/0
+KeepAlive = 30
+
+[Script]
+PostUp = 
+PostDown = 
+EOF
+    
+    # Create systemd service
+    cat > /lib/systemd/system/warp-go.service <<EOF
+[Unit]
+Description=Cloudflare WARP Service
+After=network.target
+Documentation=https://developers.cloudflare.com/warp-client/
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/usr/local/bin
+ExecStart=/usr/local/bin/warp-go --config=/usr/local/bin/warp.conf
+Restart=always
+RestartSec=3
+Environment="LOG_LEVEL=info"
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    
+    # Enable and start service
+    systemctl daemon-reload
+    systemctl enable warp-go
+    systemctl start warp-go
+    
+    # Wait for WARP to start
+    echo -e "${YELLOW}Waiting for WARP to start...${NC}"
+    sleep 5
+    
+    # Check installation
+    if systemctl is-active --quiet warp-go; then
+        echo -e "${GREEN}✓ WARP service is running${NC}"
+        
+        # Configure routing for all traffic
+        echo -e "${YELLOW}Configuring routing...${NC}"
+        
+        # Get current IPs
+        local current_ipv4=$(curl -s4 https://ifconfig.me 2>/dev/null)
+        local current_ipv6=$(curl -s6 https://ifconfig.me 2>/dev/null)
+        
+        # Add IP rules to route all traffic through WARP
+        if [ -n "$current_ipv4" ]; then
+            ip rule add from $current_ipv4 lookup main 2>/dev/null || true
+            echo -e "${GREEN}✓ IPv4 routing configured${NC}"
+        fi
+        
+        if [ -n "$current_ipv6" ]; then
+            ip -6 rule add from $current_ipv6 lookup main 2>/dev/null || true
+            echo -e "${GREEN}✓ IPv6 routing configured${NC}"
+        fi
+        
+        # Create WARP-UP script for monitoring
+        cat > /root/WARP-UP.sh <<'EOF'
+#!/bin/bash
+while true; do
+    if ! systemctl is-active --quiet warp-go; then
+        systemctl restart warp-go
+        sleep 10
+    fi
+    
+    # Check connectivity
+    if ! curl -s4 --max-time 5 https://cloudflare.com >/dev/null 2>&1; then
+        systemctl restart warp-go
+    fi
+    
+    sleep 60
+done
+EOF
+        
+        chmod +x /root/WARP-UP.sh
+        
+        # Start monitoring in screen
+        if command -v screen >/dev/null 2>&1; then
+            screen -dmS warp-monitor /bin/bash /root/WARP-UP.sh
+            echo -e "${GREEN}✓ WARP monitoring started${NC}"
+        fi
+        
+        # Configure cron jobs
+        reswarp
+        
+        # Create warpip directory
+        mkdir -p /root/warpip
+        
+        # Test WARP connection
+        echo -e "${YELLOW}Testing WARP connection...${NC}"
+        sleep 3
+        
+        # Show WARP status
+        check_warp_status
+        
+        echo -e "\n${GREEN}✅ Cloudflare WARP installation completed!${NC}"
+        echo -e "${YELLOW}All traffic is now routed through Cloudflare WARP.${NC}"
+        echo -e "${BLUE}Configuration file: /usr/local/bin/warp.conf${NC}"
+        echo -e "${BLUE}Service: warp-go${NC}"
+        echo -e "${BLUE}Monitoring: screen -r warp-monitor${NC}"
+        
+    else
+        echo -e "${RED}✗ Failed to start WARP service${NC}"
+        systemctl status warp-go --no-pager
+        return 1
+    fi
+}
+
+# Remove WARP
+remove_warp() {
+    if ! confirm_action "This will remove Cloudflare WARP and restore original routing!"; then
+        echo -e "${YELLOW}Operation cancelled.${NC}"
+        return
+    fi
+    
+    echo -e "${YELLOW}Removing Cloudflare WARP...${NC}"
+    
+    # Stop and disable service
+    systemctl stop warp-go 2>/dev/null
+    systemctl disable warp-go 2>/dev/null
+    
+    # Kill monitoring screen
+    screen -ls | grep warp-monitor | cut -d. -f1 | xargs kill 2>/dev/null
+    
+    # Remove cron jobs
+    unreswarp
+    
+    # Remove files
+    rm -f /usr/local/bin/warp-go
+    rm -f /usr/local/bin/warp.conf
+    rm -f /lib/systemd/system/warp-go.service
+    rm -f /root/WARP-UP.sh
+    rm -rf /root/warpip
+    
+    # Reload systemd
+    systemctl daemon-reload 2>/dev/null
+    
+    echo -e "${GREEN}✓ Cloudflare WARP removed successfully!${NC}"
+    echo -e "${YELLOW}Routing restored to original configuration.${NC}"
+}
+
+# WARP Management Menu
+manage_warp() {
+    while true; do
+        echo -e "\n${YELLOW}Cloudflare WARP Management${NC}"
+        echo -e "1) Install/Reinstall WARP"
+        echo -e "2) Check WARP Status"
+        echo -e "3) Restart WARP Service"
+        echo -e "4) Remove WARP"
+        echo -e "5) Back to Main Menu"
+        
+        read -p "Enter your choice [1-5]: " warp_choice
+        
+        case $warp_choice in
+            1)
+                install_warp_cloudflare
+                ;;
+            2)
+                check_warp_status
+                ;;
+            3)
+                if systemctl restart warp-go 2>/dev/null; then
+                    echo -e "${GREEN}✓ WARP service restarted${NC}"
+                    sleep 2
+                    check_warp_status
+                else
+                    echo -e "${RED}✗ Failed to restart WARP service${NC}"
+                fi
+                ;;
+            4)
+                remove_warp
+                ;;
+            5)
+                return
+                ;;
+            *)
+                echo -e "${RED}Invalid option!${NC}"
+                ;;
+        esac
+        
+        read -p "Press [Enter] to continue..."
+    done
+}
+
 # Reset ALL Changes
 reset_all() {
     if ! confirm_action "This will reset ALL changes to default settings!"; then
@@ -1506,6 +2091,16 @@ reset_all() {
     
     # Delete VXLAN tunnels
     delete_vxlan_tunnel
+    
+    # Remove WARP
+    remove_warp
+    
+    # Stop and disable HAProxy
+    if command -v haproxy >/dev/null 2>&1; then
+        systemctl stop haproxy 2>/dev/null
+        systemctl disable haproxy 2>/dev/null
+        echo -e "${GREEN}HAProxy stopped and disabled.${NC}"
+    fi
     
     sysctl -p >/dev/null 2>&1
 
@@ -1545,9 +2140,11 @@ show_menu() {
         echo -e "18) Setup Iran Tunnel"
         echo -e "19) Setup Kharej Tunnel"
         echo -e "20) Delete VXLAN Tunnel"
-        echo -e "21) Exit"
+        echo -e "21) Install HAProxy & All Ports"
+        echo -e "22) Cloudflare WARP Management"
+        echo -e "23) Exit"
         
-        read -p "Enter your choice [1-21]: " choice
+        read -p "Enter your choice [1-23]: " choice
         
         case $choice in
             1)
@@ -1617,6 +2214,12 @@ show_menu() {
                 delete_vxlan_tunnel
                 ;;
             21)
+                install_haproxy_all_ports
+                ;;
+            22)
+                manage_warp
+                ;;
+            23)
                 echo -e "${GREEN}Exiting... Thank you for using $SCRIPT_NAME!${NC}"
                 exit 0
                 ;;
