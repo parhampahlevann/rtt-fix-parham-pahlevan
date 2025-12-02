@@ -1192,7 +1192,7 @@ manage_tunnel() {
 # NEW FEATURES START HERE
 # ============================================================================
 
-# TCP MUX Configuration (گزینه 15)
+# TCP MUX Configuration (Option 15)
 configure_tcp_mux() {
     echo -e "${YELLOW}Configuring TCP MUX for better connection handling...${NC}"
     print_separator
@@ -1284,7 +1284,7 @@ EOT
     echo -e "${GREEN}✓ TCP MUX configuration completed successfully!${NC}"
 }
 
-# System Reboot (گزینه 16)
+# System Reboot (Option 16)
 system_reboot() {
     if ! confirm_action "This will reboot the system immediately!"; then
         echo -e "${YELLOW}Reboot cancelled.${NC}"
@@ -1309,7 +1309,7 @@ system_reboot() {
     reboot
 }
 
-# Best MTU Auto-detection (گزینه 17)
+# Best MTU Auto-detection (Option 17)
 find_best_mtu() {
     echo -e "${YELLOW}Searching for the best MTU size (1280-1500)...${NC}"
     print_separator
@@ -1402,7 +1402,7 @@ find_best_mtu() {
     fi
 }
 
-# Iran VXLAN Tunnel (گزینه 18) - EXACT CODE AS REQUESTED
+# Iran VXLAN Tunnel (Option 18) - EXACT CODE AS REQUESTED
 setup_iran_tunnel() {
     echo -e "${YELLOW}Setting up IRAN VXLAN Tunnel...${NC}"
     print_separator
@@ -1438,7 +1438,7 @@ EOF
     echo -e "${YELLOW}Remote IP should be: 10.123.1.2${NC}"
 }
 
-# Kharej VXLAN Tunnel (گزینه 19) - EXACT CODE AS REQUESTED
+# Kharej VXLAN Tunnel (Option 19) - EXACT CODE AS REQUESTED
 setup_kharej_tunnel() {
     echo -e "${YELLOW}Setting up KHAREJ VXLAN Tunnel...${NC}"
     print_separator
@@ -1473,7 +1473,7 @@ EOF
     echo -e "${YELLOW}Remote IP should be: 10.123.1.1${NC}"
 }
 
-# Delete VXLAN Tunnel (گزینه 20)
+# Delete VXLAN Tunnel (Option 20)
 delete_vxlan_tunnel() {
     if ! confirm_action "This will delete all VXLAN tunnels and configurations!"; then
         echo -e "${YELLOW}Operation cancelled.${NC}"
@@ -1501,7 +1501,7 @@ delete_vxlan_tunnel() {
     echo -e "${GREEN}✓ All VXLAN tunnels and configurations have been removed!${NC}"
 }
 
-# HAProxy Installation and Configuration (گزینه 21)
+# HAProxy Installation and Configuration (Option 21)
 install_haproxy_all_ports() {
     echo -e "${YELLOW}Installing HAProxy and configuring all ports...${NC}"
     print_separator
@@ -1710,8 +1710,25 @@ EOF
 }
 
 # ============================================================================
-# CLOUDFLARE WARP INSTALLATION (Improved) - گزینه 22
+# CLOUDFLARE WARP INSTALLATION (Improved) - Option 22
 # ============================================================================
+
+# Export PATH and LANG
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin
+export LANG=en_US.UTF-8
+
+# Color Functions
+red(){ echo -e "\033[31m\033[01m$1\033[0m";}
+green(){ echo -e "\033[32m\033[01m$1\033[0m";}
+yellow(){ echo -e "\033[33m\033[01m$1\033[0m";}
+blue(){ echo -e "\033[36m\033[01m$1\033[0m";}
+white(){ echo -e "\033[37m\033[01m$1\033[0m";}
+bblue(){ echo -e "\033[34m\033[01m$1\033[0m";}
+rred(){ echo -e "\033[35m\033[01m$1\033[0m";}
+
+# Read functions
+readtp(){ read -t5 -n26 -p "$(yellow "$1")" $2;}
+readp(){ read -p "$(yellow "$1")" $2;}
 
 # Get CPU architecture
 get_cpu_arch() {
@@ -1735,7 +1752,7 @@ get_cpu_arch() {
     esac
 }
 
-# Check WARP status
+# WARP Status Check
 check_warp_status() {
     echo -e "${YELLOW}Checking WARP status...${NC}"
     
@@ -1796,7 +1813,107 @@ check_warp_status() {
     fi
 }
 
-# Install WARP from the official source
+# TUN Configuration
+tun(){
+if [[ $vi = openvz ]]; then
+TUN=$(cat /dev/net/tun 2>&1)
+if [[ ! $TUN =~ 'in bad state' ]] && [[ ! $TUN =~ '处于错误状态' ]] && [[ ! $TUN =~ 'Die Dateizugriffsnummer ist in schlechter Verfassung' ]]; then 
+red "TUN not detected, attempting to add TUN support" && sleep 4
+cd /dev && mkdir net && mknod net/tun c 10 200 && chmod 0666 net/tun
+TUN=$(cat /dev/net/tun 2>&1)
+if [[ ! $TUN =~ 'in bad state' ]] && [[ ! $TUN =~ '处于错误状态' ]] && [[ ! $TUN =~ 'Die Dateizugriffsnummer ist in schlechter Verfassung' ]]; then 
+green "Failed to add TUN support, contact VPS provider or enable from backend" && exit
+else
+echo '#!/bin/bash' > /root/tun.sh && echo 'cd /dev && mkdir net && mknod net/tun c 10 200 && chmod 0666 net/tun' >> /root/tun.sh && chmod +x /root/tun.sh
+grep -qE "^ *@reboot root bash /root/tun.sh >/dev/null 2>&1" /etc/crontab || echo "@reboot root bash /root/tun.sh >/dev/null 2>&1" >> /etc/crontab
+green "TUN daemon started"
+fi
+fi
+fi
+}
+
+# Netflix Tests
+nf4(){
+UA_Browser="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.87 Safari/537.36"
+result=$(curl -4fsL --user-agent "${UA_Browser}" --write-out %{http_code} --output /dev/null --max-time 10 "https://www.netflix.com/title/70143836" 2>&1)
+if [[ "$result" == "404" ]]; then 
+NF="Regret, current IP only unlocks Netflix original series"
+elif [[ "$result" == "403" ]]; then
+NF="Bad news, current IP cannot access Netflix"
+elif [[ "$result" == "200" ]]; then
+NF="Congratulations, current IP fully unlocks Netflix non-original series"
+else
+NF="Give up, Netflix does not serve current IP region"
+fi
+}
+
+nf6(){
+UA_Browser="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.87 Safari/537.36"
+result=$(curl -6fsL --user-agent "${UA_Browser}" --write-out %{http_code} --output /dev/null --max-time 10 "https://www.netflix.com/title/70143836" 2>&1)
+if [[ "$result" == "404" ]]; then 
+NF="Regret, current IP only unlocks Netflix original series"
+elif [[ "$result" == "403" ]]; then
+NF="Bad news, current IP cannot access Netflix"
+elif [[ "$result" == "200" ]]; then
+NF="Congratulations, current IP fully unlocks Netflix non-original series"
+else
+NF="Give up, Netflix does not serve current IP region"
+fi
+}
+
+# Get IPv4 and IPv6
+v4v6(){
+v4=$(curl -s4m5 icanhazip.com -k)
+v6=$(curl -s6m5 icanhazip.com -k)
+}
+
+# Check WGCF
+checkwgcf(){
+wgcfv6=$(curl -s6m5 https://www.cloudflare.com/cdn-cgi/trace -k | grep warp | cut -d= -f2) 
+wgcfv4=$(curl -s4m5 https://www.cloudflare.com/cdn-cgi/trace -k | grep warp | cut -d= -f2) 
+}
+
+# WARP IP
+warpip(){
+mkdir -p /root/warpip
+v4v6
+if [[ -z $v4 ]]; then
+endpoint=[2606:4700:d0::a29f:c001]:2408
+else
+endpoint=162.159.192.1:2408
+fi
+}
+
+# MTU for WARP
+mtuwarp(){
+v4v6
+yellow "Starting automatic setting of WARP MTU for optimal network throughput!"
+MTUy=1500
+MTUc=10
+if [[ -n $v6 && -z $v4 ]]; then
+ping='ping6'
+IP1='2606:4700:4700::1111'
+IP2='2001:4860:4860::8888'
+else
+ping='ping'
+IP1='1.1.1.1'
+IP2='8.8.8.8'
+fi
+while true; do
+if ${ping} -c1 -W1 -s$((${MTUy} - 28)) -Mdo ${IP1} >/dev/null 2>&1 || ${ping} -c1 -W1 -s$((${MTUy} - 28)) -Mdo ${IP2} >/dev/null 2>&1; then
+MTUc=1
+MTUy=$((${MTUy} + ${MTUc}))
+else
+MTUy=$((${MTUy} - ${MTUc}))
+[[ ${MTUc} = 1 ]] && break
+fi
+[[ ${MTUy} -le 1360 ]] && MTUy='1360' && break
+done
+MTU=$((${MTUy} - 80))
+green "MTU optimal network throughput value = $MTU has been set"
+}
+
+# Enhanced WARP Installation
 install_warp_cloudflare() {
     echo -e "${YELLOW}Installing Cloudflare WARP (from official source)...${NC}"
     print_separator
@@ -1817,13 +1934,43 @@ install_warp_cloudflare() {
         rm -f /lib/systemd/system/warp-go.service
     fi
     
+    # Check root
+    [[ $EUID -ne 0 ]] && yellow "Please run script as root" && exit
+    
     # Detect OS
-    detect_distro
-    echo -e "${BLUE}Detected OS: $DISTRO $DISTRO_VERSION${NC}"
+    if [[ -f /etc/redhat-release ]]; then
+        release="Centos"
+    elif cat /etc/issue | grep -q -E -i "debian"; then
+        release="Debian"
+    elif cat /etc/issue | grep -q -E -i "ubuntu"; then
+        release="Ubuntu"
+    elif cat /etc/issue | grep -q -E -i "centos|red hat|redhat"; then
+        release="Centos"
+    elif cat /proc/version | grep -q -E -i "debian"; then
+        release="Debian"
+    elif cat /proc/version | grep -q -E -i "ubuntu"; then
+        release="Ubuntu"
+    elif cat /proc/version | grep -q -E -i "centos|red hat|redhat"; then
+        release="Centos"
+    else 
+        red "Current system not supported, please use Ubuntu, Debian, Centos system." && exit
+    fi
+    
+    vsid=$(grep -i version_id /etc/os-release | cut -d \" -f2 | cut -d . -f1)
+    op=$(cat /etc/redhat-release 2>/dev/null || cat /etc/os-release 2>/dev/null | grep -i pretty_name | cut -d \" -f2)
+    version=$(uname -r | cut -d "-" -f1)
+    main=$(uname -r | cut -d "." -f1)
+    minor=$(uname -r | cut -d "." -f2)
+    vi=$(systemd-detect-virt)
+    
+    case "$release" in
+        "Centos") yumapt='yum -y';;
+        "Ubuntu"|"Debian") yumapt="apt-get -y";;
+    esac
     
     # Install dependencies
     echo -e "${YELLOW}Installing dependencies...${NC}"
-    case $DISTRO in
+    case $release in
         ubuntu|debian)
             apt-get update
             apt-get install -y curl wget screen iproute2 openresolv dnsutils iputils-ping
@@ -1845,9 +1992,17 @@ install_warp_cloudflare() {
             ;;
     esac
     
+    # Check TUN
+    tun
+    
     # Get CPU architecture
-    local cpu_arch=$(get_cpu_arch)
-    echo -e "${GREEN}CPU Architecture: $cpu_arch${NC}"
+    case $(uname -m) in
+        aarch64) cpu=arm64;;
+        x86_64) cpu=amd64;;
+        *) red "Script currently does not support $(uname -m) architecture" && exit;;
+    esac
+    
+    echo -e "${GREEN}CPU Architecture: $cpu${NC}"
     
     # Create temporary directory
     local temp_dir=$(mktemp -d)
@@ -1860,7 +2015,7 @@ install_warp_cloudflare() {
     local warp_go_downloaded=false
     
     # Try source 1: GitHub
-    if wget -q --timeout=10 --tries=3 -O warp-go "https://github.com/fscarmen/warp/releases/latest/download/warp-go_linux_$cpu_arch"; then
+    if wget -q --timeout=10 --tries=3 -O warp-go "https://github.com/fscarmen/warp/releases/latest/download/warp-go_linux_$cpu"; then
         chmod +x warp-go
         mv warp-go /usr/local/bin/warp-go
         warp_go_downloaded=true
@@ -1869,7 +2024,7 @@ install_warp_cloudflare() {
         echo -e "${YELLOW}⚠ GitHub download failed, trying alternative source...${NC}"
         
         # Try source 2: GitLab
-        if wget -q --timeout=10 --tries=3 -O warp-go "https://gitlab.com/rwkgyg/CFwarp/-/raw/main/warp-go_1.0.8_linux_$cpu_arch"; then
+        if wget -q --timeout=10 --tries=3 -O warp-go "https://gitlab.com/rwkgyg/CFwarp/-/raw/main/warp-go_1.0.8_linux_$cpu"; then
             chmod +x warp-go
             mv warp-go /usr/local/bin/warp-go
             warp_go_downloaded=true
@@ -1878,7 +2033,7 @@ install_warp_cloudflare() {
             echo -e "${YELLOW}⚠ GitLab download failed, trying backup source...${NC}"
             
             # Try source 3: Direct download
-            if wget -q --timeout=15 --tries=3 -O warp-go "https://cdn.jsdelivr.net/gh/fscarmen/warp/warp-go_linux_$cpu_arch"; then
+            if wget -q --timeout=15 --tries=3 -O warp-go "https://cdn.jsdelivr.net/gh/fscarmen/warp/warp-go_linux_$cpu"; then
                 chmod +x warp-go
                 mv warp-go /usr/local/bin/warp-go
                 warp_go_downloaded=true
@@ -1921,6 +2076,10 @@ PostUp =
 PostDown = 
 EOF
     fi
+    
+    # Set optimal MTU
+    mtuwarp
+    sed -i "s/MTU.*/MTU = $MTU/g" /usr/local/bin/warp.conf
     
     # Create systemd service
     echo -e "${YELLOW}Creating systemd service...${NC}"
