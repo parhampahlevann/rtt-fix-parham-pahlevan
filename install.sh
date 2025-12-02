@@ -2,7 +2,7 @@
 
 # Global Configuration
 SCRIPT_NAME="Ultimate Network Optimizer"
-SCRIPT_VERSION="9.4"  # Added WARP Cloudflare support
+SCRIPT_VERSION="9.4.1"  # Updated: Safe WARP installation
 AUTHOR="Parham Pahlevan"
 CONFIG_FILE="/etc/network_optimizer.conf"
 LOG_FILE="/var/log/network_optimizer.log"
@@ -971,14 +971,14 @@ self_update() {
     echo -e "Author: ${BOLD}$AUTHOR${NC}"
     echo ""
     echo -e "${YELLOW}Update Information:${NC}"
-    echo -e "• New features in v9.4:"
+    echo -e "• New features in v9.4.1:"
     echo -e "  ✓ TCP MUX Configuration"
     echo -e "  ✓ VXLAN Tunnel Setup"
     echo -e "  ✓ Best MTU Auto-detection"
     echo -e "  ✓ Reboot functionality"
     echo -e "  ✓ Tunnel management"
     echo -e "  ✓ HAProxy Installation"
-    echo -e "  ✓ Cloudflare WARP Installation (Improved)"
+    echo -e "  ✓ Cloudflare WARP Installation (SAFE VERSION)"
     echo ""
     echo -e "${GREEN}This is the latest version!${NC}"
     echo -e "${YELLOW}For future updates, check the GitHub repository.${NC}"
@@ -1710,17 +1710,8 @@ EOF
 }
 
 # ============================================================================
-# CLOUDFLARE WARP INSTALLATION (Enhanced with Location Selection) - Option 22
+# CLOUDFLARE WARP INSTALLATION (Simple & Safe Version) - Option 22
 # ============================================================================
-
-# Cloudflare WARP IP Pool for different locations
-declare -A WARP_IP_POOLS=(
-    ["US"]="162.159.192.1 162.159.192.2 162.159.192.3 162.159.192.4 162.159.192.5 162.159.192.6 162.159.192.7 162.159.192.8"
-    ["EU"]="162.159.193.1 162.159.193.2 162.159.193.3 162.159.193.4 162.159.193.5 162.159.193.6 162.159.193.7 162.159.193.8"
-    ["ASIA"]="162.159.195.1 162.159.195.2 162.159.195.3 162.159.195.4 162.159.195.5 162.159.195.6 162.159.195.7 162.159.195.8"
-    ["AU"]="162.159.196.1 162.159.196.2 162.159.196.3 162.159.196.4 162.159.196.5 162.159.196.6 162.159.196.7 162.159.196.8"
-    ["SA"]="162.159.197.1 162.159.197.2 162.159.197.3 162.159.197.4 162.159.197.5 162.159.197.6 162.159.197.7 162.159.197.8"
-)
 
 # Cloudflare WARP endpoints for different locations
 declare -A WARP_ENDPOINTS=(
@@ -1729,15 +1720,6 @@ declare -A WARP_ENDPOINTS=(
     ["ASIA"]="162.159.195.1:2408"
     ["AU"]="162.159.196.1:2408"
     ["SA"]="162.159.197.1:2408"
-)
-
-# Cloudflare DNS servers for different locations
-declare -A WARP_DNS_SERVERS=(
-    ["US"]="1.1.1.1 1.0.0.1"
-    ["EU"]="1.1.1.1 1.0.0.1"
-    ["ASIA"]="1.1.1.1 1.0.0.1"
-    ["AU"]="1.1.1.1 1.0.0.1"
-    ["SA"]="1.1.1.1 1.0.0.1"
 )
 
 # Get CPU architecture
@@ -1770,30 +1752,25 @@ show_warp_locations() {
     echo -e "\n${YELLOW}Available Cloudflare WARP Locations:${NC}"
     echo -e "${BLUE}=========================================${NC}"
     echo -e "1) ${GREEN}United States (US)${NC}"
-    echo -e "   IP Pool: ${WARP_IP_POOLS[US]}"
     echo -e "   Endpoint: ${WARP_ENDPOINTS[US]}"
     echo -e ""
     echo -e "2) ${GREEN}Europe (EU)${NC}"
-    echo -e "   IP Pool: ${WARP_IP_POOLS[EU]}"
     echo -e "   Endpoint: ${WARP_ENDPOINTS[EU]}"
     echo -e ""
     echo -e "3) ${GREEN}Asia (ASIA)${NC}"
-    echo -e "   IP Pool: ${WARP_IP_POOLS[ASIA]}"
     echo -e "   Endpoint: ${WARP_ENDPOINTS[ASIA]}"
     echo -e ""
     echo -e "4) ${GREEN}Australia (AU)${NC}"
-    echo -e "   IP Pool: ${WARP_IP_POOLS[AU]}"
     echo -e "   Endpoint: ${WARP_ENDPOINTS[AU]}"
     echo -e ""
     echo -e "5) ${GREEN}South America (SA)${NC}"
-    echo -e "   IP Pool: ${WARP_IP_POOLS[SA]}"
     echo -e "   Endpoint: ${WARP_ENDPOINTS[SA]}"
     echo -e ""
     echo -e "6) ${YELLOW}Auto-select (Best Latency)${NC}"
     echo -e "${BLUE}=========================================${NC}"
 }
 
-# Test latency to different WARP endpoints
+# Test latency to different WARP endpoints (SAFE VERSION)
 test_warp_latency() {
     echo -e "${YELLOW}Testing latency to WARP endpoints...${NC}"
     local best_location="US"
@@ -1821,138 +1798,7 @@ test_warp_latency() {
     SELECTED_LOCATION=$best_location
 }
 
-# Route all traffic through selected WARP IP
-route_all_traffic_through_warp() {
-    local selected_ip=$1
-    local location=$2
-    
-    echo -e "${YELLOW}Routing ALL traffic through WARP IP: $selected_ip ($location)${NC}"
-    
-    # Backup current routing table
-    ip route show table main > /tmp/route_backup.txt 2>/dev/null
-    
-    # Get current gateway
-    local current_gateway=$(ip route | grep default | awk '{print $3}' | head -n1)
-    local current_interface=$(ip route | grep default | awk '{print $5}' | head -n1)
-    
-    if [[ -z "$current_gateway" ]] || [[ -z "$current_interface" ]]; then
-        echo -e "${RED}Cannot determine current gateway/interface${NC}"
-        return 1
-    fi
-    
-    echo -e "${BLUE}Current Gateway: $current_gateway on $current_interface${NC}"
-    
-    # Flush existing routes
-    ip route flush table main 2>/dev/null
-    
-    # Add default route through WARP
-    ip route add default via $current_gateway dev $current_interface 2>/dev/null
-    
-    # Add specific route for selected WARP IP through original gateway
-    ip route add $selected_ip via $current_gateway dev $current_interface 2>/dev/null
-    
-    # Add route for Cloudflare DNS
-    ip route add 1.1.1.1 via $current_gateway dev $current_interface 2>/dev/null
-    ip route add 1.0.0.1 via $current_gateway dev $current_interface 2>/dev/null
-    
-    # Add route for WARP endpoints
-    for endpoint_ip in ${WARP_IP_POOLS[$location]}; do
-        ip route add $endpoint_ip via $current_gateway dev $current_interface 2>/dev/null
-    done
-    
-    # Make routing persistent
-    make_routing_persistent $selected_ip $current_gateway $current_interface $location
-    
-    echo -e "${GREEN}✓ All traffic is now routed through WARP IP: $selected_ip${NC}"
-    echo -e "${YELLOW}Backup of original routing saved to: /tmp/route_backup.txt${NC}"
-}
-
-# Make routing configuration persistent
-make_routing_persistent() {
-    local warp_ip=$1
-    local gateway=$2
-    local interface=$3
-    local location=$4
-    
-    echo -e "${YELLOW}Making routing configuration persistent...${NC}"
-    
-    # Create network configuration script
-    cat > /etc/network/warp-routing.sh <<EOF
-#!/bin/bash
-# WARP Routing Configuration
-# Location: $location
-# Generated by $SCRIPT_NAME
-
-# Flush existing routes
-ip route flush table main 2>/dev/null
-
-# Add default route
-ip route add default via $gateway dev $interface
-
-# Add WARP IP route
-ip route add $warp_ip via $gateway dev $interface
-
-# Add Cloudflare DNS routes
-ip route add 1.1.1.1 via $gateway dev $interface
-ip route add 1.0.0.1 via $gateway dev $interface
-
-# Add WARP endpoint routes
-EOF
-    
-    # Add all WARP IPs for this location
-    for endpoint_ip in ${WARP_IP_POOLS[$location]}; do
-        echo "ip route add $endpoint_ip via $gateway dev $interface" >> /etc/network/warp-routing.sh
-    done
-    
-    # Make script executable
-    chmod +x /etc/network/warp-routing.sh
-    
-    # Add to network interfaces if using /etc/network/interfaces
-    if [[ -f /etc/network/interfaces ]]; then
-        if ! grep -q "warp-routing.sh" /etc/network/interfaces; then
-            echo "up /etc/network/warp-routing.sh" >> /etc/network/interfaces
-        fi
-    fi
-    
-    # Add to rc.local for boot persistence
-    if [[ -f /etc/rc.local ]]; then
-        if ! grep -q "warp-routing.sh" /etc/rc.local; then
-            sed -i '/^exit 0/i /etc/network/warp-routing.sh' /etc/rc.local
-        fi
-    else
-        cat > /etc/rc.local <<EOF
-#!/bin/bash
-/etc/network/warp-routing.sh
-exit 0
-EOF
-        chmod +x /etc/rc.local
-    fi
-    
-    # Create systemd service for persistence
-    cat > /etc/systemd/system/warp-routing.service <<EOF
-[Unit]
-Description=WARP Routing Service
-After=network.target
-Wants=network.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/etc/network/warp-routing.sh
-ExecStop=/bin/true
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    
-    systemctl daemon-reload
-    systemctl enable warp-routing.service
-    systemctl start warp-routing.service
-    
-    echo -e "${GREEN}✓ Routing configuration made persistent${NC}"
-}
-
-# Check WARP status with location info
+# Check WARP status (SAFE VERSION)
 check_warp_status() {
     echo -e "${YELLOW}Checking WARP status...${NC}"
     
@@ -1962,55 +1808,51 @@ check_warp_status() {
         if systemctl is-active --quiet warp-go 2>/dev/null; then
             echo -e "${GREEN}✓ warp-go service is running${NC}"
             
-            # Test WARP connection and get IP
+            # Test WARP connection
             local warp_test=$(curl -s4 --max-time 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null)
             local warp_status=$(echo "$warp_test" | grep warp | cut -d= -f2)
             local warp_ip=$(echo "$warp_test" | grep ip= | cut -d= -f2)
-            local warp_colo=$(echo "$warp_test" | grep colo= | cut -d= -f2)
             
             if [[ "$warp_status" == "on" ]] || [[ "$warp_status" == "plus" ]]; then
-                echo -e "${GREEN}✓ WARP is active${NC}"
-                echo -e "${BLUE}  WARP IP: $warp_ip${NC}"
-                echo -e "${BLUE}  Cloudflare Data Center: $warp_colo${NC}"
+                echo -e "${GREEN}✓ WARP is active (IP: $warp_ip)${NC}"
                 
-                # Determine location from colo
-                case $warp_colo in
-                    LAX|SFO|DFW|ORD|ATL|IAD|EWR|MIA)
-                        echo -e "${BLUE}  Location: United States${NC}"
-                        ;;
-                    AMS|FRA|CDG|LHR|MAD|WAW|VIE)
-                        echo -e "${BLUE}  Location: Europe${NC}"
-                        ;;
-                    SIN|HKG|NRT|ICN|BOM)
-                        echo -e "${BLUE}  Location: Asia${NC}"
-                        ;;
-                    SYD|MEL)
-                        echo -e "${BLUE}  Location: Australia${NC}"
-                        ;;
-                    GRU|EZE)
-                        echo -e "${BLUE}  Location: South America${NC}"
-                        ;;
-                    *)
-                        echo -e "${BLUE}  Location: Unknown${NC}"
-                        ;;
-                esac
-                
-                # Test if all traffic is routed through WARP
-                echo -e "${YELLOW}Testing routing...${NC}"
-                local test_ip=$(curl -s4 --max-time 5 ifconfig.me 2>/dev/null)
-                if [[ "$test_ip" == "$warp_ip" ]]; then
-                    echo -e "${GREEN}✓ All traffic is routed through WARP${NC}"
-                else
-                    echo -e "${YELLOW}⚠ Not all traffic is routed through WARP${NC}"
-                    echo -e "${YELLOW}  Server IP: $test_ip${NC}"
-                    echo -e "${YELLOW}  WARP IP: $warp_ip${NC}"
+                # Show connection details
+                if command -v wg >/dev/null 2>&1; then
+                    echo -e "${BLUE}WireGuard Interface Status:${NC}"
+                    wg show 2>/dev/null | head -10
                 fi
+                
+                # Test if traffic is going through WARP
+                local public_ip=$(curl -s4 --max-time 5 ifconfig.me 2>/dev/null)
+                if [[ -n "$warp_ip" ]] && [[ -n "$public_ip" ]]; then
+                    if [[ "$public_ip" == "$warp_ip" ]]; then
+                        echo -e "${GREEN}✓ All IPv4 traffic is routed through WARP${NC}"
+                    else
+                        echo -e "${YELLOW}⚠ IPv4 Traffic is NOT fully routed through WARP${NC}"
+                        echo -e "${YELLOW}  Server IP: $public_ip${NC}"
+                        echo -e "${YELLOW}  WARP IP: $warp_ip${NC}"
+                    fi
+                fi
+                
+                # Test IPv6 if available
+                local warp_ipv6=$(curl -s6 --max-time 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep ip= | cut -d= -f2)
+                if [[ -n "$warp_ipv6" ]]; then
+                    echo -e "${GREEN}✓ WARP IPv6 is active (IP: $warp_ipv6)${NC}"
+                fi
+                
             else
                 echo -e "${YELLOW}⚠ WARP is installed but not connected${NC}"
+                echo -e "${YELLOW}Checking WireGuard interface...${NC}"
+                if ip link show warp0 >/dev/null 2>&1; then
+                    echo -e "${GREEN}✓ WireGuard interface exists${NC}"
+                    ip addr show warp0 2>/dev/null | grep inet
+                fi
             fi
             return 0
         else
             echo -e "${YELLOW}⚠ warp-go service is not running${NC}"
+            echo -e "${YELLOW}Checking service status...${NC}"
+            systemctl status warp-go --no-pager -l 2>/dev/null | head -20
             return 1
         fi
     # Check for warp-cli (official package)
@@ -2025,16 +1867,21 @@ check_warp_status() {
             
             # Get WARP IP
             local warp_ip=$(curl -s4 --max-time 5 ifconfig.me 2>/dev/null)
-            echo -e "${BLUE}  Current IP: $warp_ip${NC}"
-            
-            # Test if it's a Cloudflare IP
-            if whois $warp_ip 2>/dev/null | grep -qi "cloudflare"; then
-                echo -e "${GREEN}✓ Traffic is routed through Cloudflare${NC}"
+            if [[ -n "$warp_ip" ]]; then
+                echo -e "${BLUE}  Current IP: $warp_ip${NC}"
             fi
             
-            return 0
+            # Test connection
+            if warp-cli --accept-tos status 2>/dev/null | grep -i "connected" >/dev/null; then
+                echo -e "${GREEN}✓ WARP is connected${NC}"
+                return 0
+            else
+                echo -e "${YELLOW}⚠ WARP is not connected${NC}"
+                return 1
+            fi
         else
             echo -e "${YELLOW}⚠ warp-svc service is not running${NC}"
+            systemctl status warp-svc --no-pager -l 2>/dev/null | head -20
             return 1
         fi
     else
@@ -2043,7 +1890,7 @@ check_warp_status() {
     fi
 }
 
-# Enhanced WARP Installation with Location Selection
+# Enhanced WARP Installation (SAFE VERSION - NO ROUTING CHANGES)
 install_warp_cloudflare() {
     echo -e "${YELLOW}Installing Cloudflare WARP with Location Selection...${NC}"
     print_separator
@@ -2072,31 +1919,7 @@ install_warp_cloudflare() {
     esac
     
     echo -e "\n${GREEN}Selected Location: $SELECTED_LOCATION${NC}"
-    
-    # Show available IPs for selected location
-    echo -e "${YELLOW}Available WARP IPs for $SELECTED_LOCATION:${NC}"
-    local ip_list=(${WARP_IP_POOLS[$SELECTED_LOCATION]})
-    for i in "${!ip_list[@]}"; do
-        echo "$(($i+1))) ${ip_list[$i]}"
-    done
-    
-    # Let user select specific IP or auto-select
-    echo -e "\n${YELLOW}Select WARP IP:${NC}"
-    read -p "Enter IP number [1-${#ip_list[@]}] or press Enter for auto-select: " ip_choice
-    
-    if [[ -n "$ip_choice" ]] && [[ "$ip_choice" =~ ^[0-9]+$ ]] && [ $ip_choice -ge 1 ] && [ $ip_choice -le ${#ip_list[@]} ]; then
-        SELECTED_IP="${ip_list[$(($ip_choice-1))]}"
-    else
-        # Auto-select random IP from pool
-        SELECTED_IP="${ip_list[$RANDOM % ${#ip_list[@]}]}"
-        echo -e "${YELLOW}Auto-selected IP: $SELECTED_IP${NC}"
-    fi
-    
-    echo -e "\n${GREEN}Configuration:${NC}"
-    echo -e "  Location: $SELECTED_LOCATION"
-    echo -e "  WARP IP: $SELECTED_IP"
-    echo -e "  Endpoint: ${WARP_ENDPOINTS[$SELECTED_LOCATION]}"
-    echo -e "  DNS: ${WARP_DNS_SERVERS[$SELECTED_LOCATION]}"
+    echo -e "${GREEN}Endpoint: ${WARP_ENDPOINTS[$SELECTED_LOCATION]}${NC}"
     
     # Check if already installed
     if command -v warp-go >/dev/null 2>&1 || command -v warp-cli >/dev/null 2>&1; then
@@ -2120,28 +1943,28 @@ install_warp_cloudflare() {
     
     echo -e "${GREEN}CPU Architecture: $cpu_arch${NC}"
     
-    # Install dependencies
-    echo -e "${YELLOW}Installing dependencies...${NC}"
+    # Install dependencies (MINIMAL)
+    echo -e "${YELLOW}Installing minimal dependencies...${NC}"
     detect_distro
     case $DISTRO in
         ubuntu|debian)
             apt-get update
-            apt-get install -y curl wget iproute2 dnsutils iputils-ping whois
+            apt-get install -y curl wget
             ;;
         centos|rhel|fedora|almalinux|rocky)
             if command -v dnf >/dev/null 2>&1; then
-                dnf install -y curl wget iproute whois
+                dnf install -y curl wget
             else
-                yum install -y curl wget iproute whois
+                yum install -y curl wget
             fi
             ;;
         *)
             if command -v apt-get >/dev/null 2>&1; then
-                apt-get update && apt-get install -y curl wget iproute2 whois
+                apt-get update && apt-get install -y curl wget
             elif command -v yum >/dev/null 2>&1; then
-                yum install -y curl wget iproute whois
+                yum install -y curl wget
             elif command -v dnf >/dev/null 2>&1; then
-                dnf install -y curl wget iproute whois
+                dnf install -y curl wget
             fi
             ;;
     esac
@@ -2150,7 +1973,7 @@ install_warp_cloudflare() {
     local temp_dir=$(mktemp -d)
     cd "$temp_dir"
     
-    # Try to install from official Cloudflare repository first
+    # Try to install from official Cloudflare repository first (SIMPLER)
     echo -e "${YELLOW}Attempting to install from official repository...${NC}"
     local repo_installed=false
     
@@ -2178,23 +2001,17 @@ install_warp_cloudflare() {
     fi
     
     if [ "$repo_installed" = true ]; then
-        # Setup warp-cli
-        echo -e "${YELLOW}Setting up WARP...${NC}"
+        # Setup warp-cli (SIMPLER)
+        echo -e "${YELLOW}Setting up WARP (official package)...${NC}"
         systemctl start warp-svc 2>/dev/null
         systemctl enable warp-svc 2>/dev/null
-        sleep 2
+        sleep 3
         
         warp-cli --accept-tos register 2>/dev/null
         warp-cli --accept-tos set-mode proxy 2>/dev/null
         warp-cli --accept-tos connect 2>/dev/null
         
         echo -e "${GREEN}✓ WARP installed successfully via official package${NC}"
-        
-        # Route all traffic through selected WARP IP
-        route_all_traffic_through_warp "$SELECTED_IP" "$SELECTED_LOCATION"
-        
-        # Update DNS to use Cloudflare
-        update_dns_for_warp "$SELECTED_LOCATION"
         
         cd /
         rm -rf "$temp_dir"
@@ -2205,8 +2022,8 @@ install_warp_cloudflare() {
         return 0
     fi
     
-    # Fallback to warp-go binary
-    echo -e "${YELLOW}Official repository failed, trying warp-go binary...${NC}"
+    # Fallback to warp-go binary (SIMPLIFIED)
+    echo -e "${YELLOW}Official repository failed, installing warp-go...${NC}"
     
     # Download warp-go
     local warpgo_url=""
@@ -2225,7 +2042,7 @@ install_warp_cloudflare() {
         return 1
     fi
     
-    echo -e "${YELLOW}Downloading warp-go from: $warpgo_url${NC}"
+    echo -e "${YELLOW}Downloading warp-go...${NC}"
     if ! wget -q --timeout=30 --tries=3 -O warp-go "$warpgo_url"; then
         echo -e "${RED}✗ Failed to download warp-go${NC}"
         cd /
@@ -2241,20 +2058,14 @@ install_warp_cloudflare() {
         return 1
     fi
     
-    # Make executable and test
+    # Make executable
     chmod +x warp-go
-    if ! ./warp-go --version 2>/dev/null; then
-        echo -e "${RED}✗ Binary is not executable or corrupted${NC}"
-        cd /
-        rm -rf "$temp_dir"
-        return 1
-    fi
     
     # Install binary
     mv warp-go /usr/local/bin/warp-go
     
-    # Create configuration with selected endpoint
-    echo -e "${YELLOW}Creating WARP configuration for $SELECTED_LOCATION...${NC}"
+    # Create SIMPLE configuration (NO advanced routing)
+    echo -e "${YELLOW}Creating WARP configuration...${NC}"
     local selected_endpoint=${WARP_ENDPOINTS[$SELECTED_LOCATION]}
     
     cat > /usr/local/bin/warp.conf <<EOF
@@ -2271,6 +2082,12 @@ PublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=
 Endpoint = $selected_endpoint
 AllowedIPs = 0.0.0.0/0, ::/0
 KeepAlive = 30
+PersistentKeepalive = 25
+
+[Interface]
+Address = 10.7.0.2/32
+Address = fd01:5ca1:ab1e:80fa:785c:29c6:853d:983/128
+DNS = 1.1.1.1,1.0.0.1
 
 [Script]
 PostUp = 
@@ -2281,7 +2098,7 @@ EOF
     echo -e "${YELLOW}Creating systemd service...${NC}"
     cat > /etc/systemd/system/warp-go.service <<EOF
 [Unit]
-Description=Cloudflare WARP Service - $SELECTED_LOCATION
+Description=Cloudflare WARP Service
 After=network.target
 Wants=network.target
 
@@ -2289,8 +2106,8 @@ Wants=network.target
 Type=simple
 User=root
 ExecStart=/usr/local/bin/warp-go --config=/usr/local/bin/warp.conf
-Restart=always
-RestartSec=3
+Restart=on-failure
+RestartSec=5
 LimitNOFILE=1000000
 
 [Install]
@@ -2299,160 +2116,120 @@ EOF
     
     # Register account
     echo -e "${YELLOW}Registering WARP account...${NC}"
-    if ! /usr/local/bin/warp-go --register --config=/usr/local/bin/warp.conf > /tmp/warp-register.log 2>&1; then
-        echo -e "${YELLOW}⚠ Registration failed, using existing configuration${NC}"
-    fi
+    /usr/local/bin/warp-go --register --config=/usr/local/bin/warp.conf > /tmp/warp-register.log 2>&1 || {
+        echo -e "${YELLOW}⚠ Registration may have issues, continuing anyway...${NC}"
+    }
     
     # Enable and start service
     systemctl daemon-reload
     systemctl enable warp-go
-    systemctl start warp-go
     
-    # Wait for service
-    echo -e "${YELLOW}Waiting for WARP to start...${NC}"
-    for i in {1..10}; do
-        if systemctl is-active --quiet warp-go; then
-            echo -e "${GREEN}✓ WARP service started successfully${NC}"
-            break
+    # Start service with timeout
+    echo -e "${YELLOW}Starting WARP service...${NC}"
+    if timeout 10 systemctl start warp-go 2>/dev/null; then
+        echo -e "${GREEN}✓ WARP service started${NC}"
+    else
+        echo -e "${YELLOW}⚠ Service start timed out, checking status...${NC}"
+    fi
+    
+    # Wait a bit
+    sleep 3
+    
+    # Check if service is running
+    if systemctl is-active --quiet warp-go 2>/dev/null; then
+        echo -e "${GREEN}✓ WARP service is active${NC}"
+        
+        # Check WireGuard interface
+        echo -e "${YELLOW}Checking network interfaces...${NC}"
+        if ip link show warp0 >/dev/null 2>&1; then
+            echo -e "${GREEN}✓ WireGuard interface (warp0) created${NC}"
+            ip addr show warp0 2>/dev/null | grep inet
+        else
+            echo -e "${YELLOW}⚠ WireGuard interface not found, checking in 5 seconds...${NC}"
+            sleep 5
+            if ip link show warp0 >/dev/null 2>&1; then
+                echo -e "${GREEN}✓ WireGuard interface created${NC}"
+            else
+                echo -e "${YELLOW}⚠ WireGuard interface still not found${NC}"
+            fi
         fi
-        echo -n "."
-        sleep 2
-    done
-    
-    # Route all traffic through selected WARP IP
-    route_all_traffic_through_warp "$SELECTED_IP" "$SELECTED_LOCATION"
-    
-    # Update DNS to use Cloudflare
-    update_dns_for_warp "$SELECTED_LOCATION"
+    else
+        echo -e "${YELLOW}⚠ WARP service is not active, checking logs...${NC}"
+        journalctl -u warp-go --no-pager -n 10
+    fi
     
     # Cleanup
     cd /
     rm -rf "$temp_dir"
     
-    # Check installation
-    if systemctl is-active --quiet warp-go; then
-        echo -e "${GREEN}✓ WARP installation completed for $SELECTED_LOCATION!${NC}"
-        
-        # Wait for connection
-        sleep 5
-        
-        # Test connection
-        echo -e "${YELLOW}Testing WARP connection...${NC}"
-        local warp_test=$(curl -s4 --max-time 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null)
-        if echo "$warp_test" | grep -q "warp=on"; then
-            local warp_ip=$(echo "$warp_test" | grep ip= | cut -d= -f2)
-            echo -e "${GREEN}✓ WARP is connected and working${NC}"
-            echo -e "${BLUE}  Assigned WARP IP: $warp_ip${NC}"
-            echo -e "${BLUE}  Selected Location: $SELECTED_LOCATION${NC}"
-        else
-            echo -e "${YELLOW}⚠ WARP is running but may not be connected${NC}"
-        fi
-        
-        check_warp_status
-        return 0
-    else
-        echo -e "${RED}✗ Failed to start WARP service${NC}"
-        echo -e "${YELLOW}Checking logs...${NC}"
-        journalctl -u warp-go --no-pager -n 10
-        return 1
-    fi
+    # Final check
+    sleep 2
+    check_warp_status
+    
+    # Important notice
+    echo -e "\n${YELLOW}IMPORTANT:${NC}"
+    echo -e "${GREEN}WARP has been installed in simple mode.${NC}"
+    echo -e "${YELLOW}If you want ALL traffic to go through WARP, you may need to:${NC}"
+    echo -e "1. Check routing table with: ${BOLD}ip route${NC}"
+    echo -e "2. Configure routing manually if needed"
+    echo -e "3. For simple proxy mode, WARP is working correctly"
+    
+    return 0
 }
 
-# Update DNS to use Cloudflare DNS
-update_dns_for_warp() {
-    local location=$1
-    local dns_servers=${WARP_DNS_SERVERS[$location]}
-    
-    echo -e "${YELLOW}Updating DNS to Cloudflare ($location)...${NC}"
-    
-    # Backup current resolv.conf
-    cp /etc/resolv.conf /etc/resolv.conf.backup.warp
-    
-    # Create new resolv.conf
-    cat > /etc/resolv.conf <<EOF
-# Cloudflare WARP DNS - $location
-nameserver 1.1.1.1
-nameserver 1.0.0.1
-nameserver 2606:4700:4700::1111
-nameserver 2606:4700:4700::1001
-options rotate
-options timeout:2
-options attempts:3
-EOF
-    
-    # Make immutable
-    chattr +i /etc/resolv.conf 2>/dev/null || true
-    
-    echo -e "${GREEN}✓ DNS updated to Cloudflare${NC}"
-}
-
-# Remove WARP and restore original configuration
+# Remove WARP (SAFE VERSION)
 remove_warp() {
-    if ! confirm_action "This will remove Cloudflare WARP and restore original routing!"; then
+    if ! confirm_action "This will remove Cloudflare WARP!"; then
         echo -e "${YELLOW}Operation cancelled.${NC}"
         return
     fi
     
     echo -e "${YELLOW}Removing Cloudflare WARP...${NC}"
     
-    # Restore original routing if backup exists
-    if [ -f /tmp/route_backup.txt ]; then
-        echo -e "${YELLOW}Restoring original routing...${NC}"
-        while read -r route; do
-            ip route add $route 2>/dev/null
-        done < /tmp/route_backup.txt
-    fi
-    
     # Stop and remove warp-go
     systemctl stop warp-go 2>/dev/null
     systemctl disable warp-go 2>/dev/null
-    rm -f /usr/local/bin/warp-go
-    rm -f /usr/local/bin/warp.conf
-    rm -f /etc/systemd/system/warp-go.service
+    rm -f /usr/local/bin/warp-go 2>/dev/null
+    rm -f /usr/local/bin/warp.conf 2>/dev/null
+    rm -f /etc/systemd/system/warp-go.service 2>/dev/null
     
     # Stop and remove warp-cli (official package)
     systemctl stop warp-svc 2>/dev/null
     systemctl disable warp-svc 2>/dev/null
     
-    # Remove warp-routing service
-    systemctl stop warp-routing.service 2>/dev/null
-    systemctl disable warp-routing.service 2>/dev/null
-    rm -f /etc/systemd/system/warp-routing.service
-    rm -f /etc/network/warp-routing.sh
-    
     # Remove official package if installed
     if command -v apt-get >/dev/null 2>&1 && dpkg -l | grep -q cloudflare-warp; then
+        echo -e "${YELLOW}Removing official WARP package...${NC}"
         apt-get remove --purge -y cloudflare-warp 2>/dev/null
-        rm -f /etc/apt/sources.list.d/cloudflare-client.list
-        rm -f /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+        rm -f /etc/apt/sources.list.d/cloudflare-client.list 2>/dev/null
+        rm -f /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg 2>/dev/null
     elif command -v yum >/dev/null 2>&1 && rpm -qa | grep -q cloudflare-warp; then
+        echo -e "${YELLOW}Removing official WARP package...${NC}"
         yum remove -y cloudflare-warp 2>/dev/null
-        rm -f /etc/yum.repos.d/cloudflare-warp.repo
+        rm -f /etc/yum.repos.d/cloudflare-warp.repo 2>/dev/null
     elif command -v dnf >/dev/null 2>&1 && rpm -qa | grep -q cloudflare-warp; then
+        echo -e "${YELLOW}Removing official WARP package...${NC}"
         dnf remove -y cloudflare-warp 2>/dev/null
-        rm -f /etc/yum.repos.d/cloudflare-warp.repo
+        rm -f /etc/yum.repos.d/cloudflare-warp.repo 2>/dev/null
     fi
     
-    # Restore original DNS
-    if [ -f /etc/resolv.conf.backup.warp ]; then
-        echo -e "${YELLOW}Restoring original DNS...${NC}"
-        chattr -i /etc/resolv.conf 2>/dev/null || true
-        cp /etc/resolv.conf.backup.warp /etc/resolv.conf
-        rm -f /etc/resolv.conf.backup.warp
+    # Remove WireGuard interface if exists
+    if ip link show warp0 >/dev/null 2>&1; then
+        echo -e "${YELLOW}Removing WireGuard interface...${NC}"
+        ip link del warp0 2>/dev/null
     fi
     
     # Cleanup files
     rm -f /root/WARP-UP.sh 2>/dev/null
     rm -rf /root/warpip 2>/dev/null
     
+    # Remove old routing scripts
+    rm -f /etc/network/warp-routing.sh 2>/dev/null
+    rm -f /etc/systemd/system/warp-routing.service 2>/dev/null
+    
     # Remove from rc.local
     if [ -f /etc/rc.local ]; then
-        sed -i '/warp-routing.sh/d' /etc/rc.local
-    fi
-    
-    # Remove from /etc/network/interfaces
-    if [ -f /etc/network/interfaces ]; then
-        sed -i '/warp-routing.sh/d' /etc/network/interfaces
+        sed -i '/warp-routing.sh/d' /etc/rc.local 2>/dev/null
     fi
     
     # Remove cron jobs
@@ -2463,24 +2240,23 @@ remove_warp() {
     systemctl daemon-reload 2>/dev/null
     
     echo -e "${GREEN}✓ Cloudflare WARP removed successfully!${NC}"
-    echo -e "${YELLOW}✓ Original routing and DNS restored${NC}"
+    echo -e "${YELLOW}✓ Network configuration restored${NC}"
 }
 
-# WARP Management Menu
+# WARP Management Menu (SAFE VERSION)
 manage_warp() {
     while true; do
-        echo -e "\n${YELLOW}Cloudflare WARP Management${NC}"
+        echo -e "\n${YELLOW}Cloudflare WARP Management (Safe Mode)${NC}"
         echo -e "1) Install/Reinstall WARP (with Location Selection)"
         echo -e "2) Check WARP Status"
         echo -e "3) Restart WARP Service"
         echo -e "4) Stop WARP Service"
         echo -e "5) Remove WARP"
         echo -e "6) View WARP Logs"
-        echo -e "7) Change WARP Location"
-        echo -e "8) Test WARP Latency"
-        echo -e "9) Back to Main Menu"
+        echo -e "7) Test WARP Latency"
+        echo -e "8) Back to Main Menu"
         
-        read -p "Enter your choice [1-9]: " warp_choice
+        read -p "Enter your choice [1-8]: " warp_choice
         
         case $warp_choice in
             1)
@@ -2494,17 +2270,18 @@ manage_warp() {
                 if command -v warp-go >/dev/null 2>&1; then
                     if systemctl restart warp-go 2>/dev/null; then
                         echo -e "${GREEN}✓ warp-go service restarted${NC}"
+                        sleep 2
                     else
                         echo -e "${RED}✗ Failed to restart warp-go${NC}"
                     fi
                 elif command -v warp-cli >/dev/null 2>&1; then
                     if systemctl restart warp-svc 2>/dev/null; then
                         echo -e "${GREEN}✓ warp-svc service restarted${NC}"
+                        sleep 2
                     else
                         echo -e "${RED}✗ Failed to restart warp-svc${NC}"
                     fi
                 fi
-                sleep 3
                 check_warp_status
                 ;;
             4)
@@ -2529,34 +2306,18 @@ manage_warp() {
             6)
                 echo -e "${YELLOW}Showing WARP logs...${NC}"
                 if command -v warp-go >/dev/null 2>&1; then
-                    journalctl -u warp-go --no-pager -n 20
+                    journalctl -u warp-go --no-pager -n 30
                 elif command -v warp-cli >/dev/null 2>&1; then
-                    journalctl -u warp-svc --no-pager -n 20
+                    journalctl -u warp-svc --no-pager -n 30
                 else
                     echo -e "${RED}WARP is not installed${NC}"
                 fi
                 ;;
             7)
-                echo -e "${YELLOW}Changing WARP Location...${NC}"
-                show_warp_locations
-                read -p "Enter new location [US/EU/ASIA/AU/SA]: " new_location
-                if [[ -n "${WARP_ENDPOINTS[$new_location]}" ]]; then
-                    echo -e "${GREEN}Changing to $new_location...${NC}"
-                    # This would require reinstalling with new location
-                    read -p "This requires reinstall. Continue? (yes/no): " reinstall_confirm
-                    if [[ "$reinstall_confirm" == "yes" ]] || [[ "$reinstall_confirm" == "y" ]]; then
-                        SELECTED_LOCATION=$new_location
-                        install_warp_cloudflare
-                    fi
-                else
-                    echo -e "${RED}Invalid location!${NC}"
-                fi
-                ;;
-            8)
                 echo -e "${YELLOW}Testing WARP latency to different locations...${NC}"
                 test_warp_latency
                 ;;
-            9)
+            8)
                 return
                 ;;
             *)
