@@ -163,17 +163,17 @@ show_header() {
     fi
     
     # Show WARP Status
-    if command -v warp-go >/dev/null 2>&1; then
-        if systemctl is-active --quiet warp-go 2>/dev/null; then
-            local warp_ipv4=$(curl -s4 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep warp | cut -d= -f2)
-            local warp_ipv6=$(curl -s6 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep warp | cut -d= -f2)
+    if command -v warp-go >/dev/null 2>&1 || command -v warp-cli >/dev/null 2>&1; then
+        if systemctl is-active --quiet warp-go 2>/dev/null || systemctl is-active --quiet warp-svc 2>/dev/null; then
+            local warp_ipv4=$(curl -s4 --max-time 3 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep warp | cut -d= -f2)
+            local warp_ipv6=$(curl -s6 --max-time 3 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep warp | cut -d= -f2)
             
             if [[ "$warp_ipv4" == "on" ]] || [[ "$warp_ipv4" == "plus" ]]; then
                 echo -e "${YELLOW}Cloudflare WARP: ${GREEN}Active (IPv4)${NC}"
             elif [[ "$warp_ipv6" == "on" ]] || [[ "$warp_ipv6" == "plus" ]]; then
                 echo -e "${YELLOW}Cloudflare WARP: ${GREEN}Active (IPv6)${NC}"
             else
-                echo -e "${YELLOW}Cloudflare WARP: ${YELLOW}Installed (Not running)${NC}"
+                echo -e "${YELLOW}Cloudflare WARP: ${YELLOW}Installed (Not connected)${NC}"
             fi
         else
             echo -e "${YELLOW}Cloudflare WARP: ${RED}Not running${NC}"
@@ -1710,25 +1710,8 @@ EOF
 }
 
 # ============================================================================
-# CLOUDFLARE WARP INSTALLATION (Improved) - Option 22
+# CLOUDFLARE WARP INSTALLATION (Fixed) - Option 22
 # ============================================================================
-
-# Export PATH and LANG
-export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin
-export LANG=en_US.UTF-8
-
-# Color Functions
-red(){ echo -e "\033[31m\033[01m$1\033[0m";}
-green(){ echo -e "\033[32m\033[01m$1\033[0m";}
-yellow(){ echo -e "\033[33m\033[01m$1\033[0m";}
-blue(){ echo -e "\033[36m\033[01m$1\033[0m";}
-white(){ echo -e "\033[37m\033[01m$1\033[0m";}
-bblue(){ echo -e "\033[34m\033[01m$1\033[0m";}
-rred(){ echo -e "\033[35m\033[01m$1\033[0m";}
-
-# Read functions
-readtp(){ read -t5 -n26 -p "$(yellow "$1")" $2;}
-readp(){ read -p "$(yellow "$1")" $2;}
 
 # Get CPU architecture
 get_cpu_arch() {
@@ -1741,185 +1724,70 @@ get_cpu_arch() {
             echo "arm64"
             ;;
         armv7l)
-            echo "armv7"
+            echo "arm"
             ;;
         armv6l)
-            echo "armv6"
+            echo "arm"
+            ;;
+        i386|i686)
+            echo "386"
             ;;
         *)
-            echo "amd64"  # Default to amd64
+            echo "unknown"
             ;;
     esac
 }
 
-# WARP Status Check
+# Check WARP status
 check_warp_status() {
     echo -e "${YELLOW}Checking WARP status...${NC}"
     
-    if ! command -v warp-go >/dev/null 2>&1; then
+    # Check for warp-go
+    if command -v warp-go >/dev/null 2>&1; then
+        echo -e "${GREEN}✓ warp-go is installed${NC}"
+        if systemctl is-active --quiet warp-go 2>/dev/null; then
+            echo -e "${GREEN}✓ warp-go service is running${NC}"
+            
+            # Test WARP connection
+            local warp_test=$(curl -s4 --max-time 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep warp | cut -d= -f2)
+            if [[ "$warp_test" == "on" ]] || [[ "$warp_test" == "plus" ]]; then
+                local warp_ip=$(curl -s4 --max-time 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep ip= | cut -d= -f2)
+                echo -e "${GREEN}✓ WARP is active (IP: $warp_ip)${NC}"
+            else
+                echo -e "${YELLOW}⚠ WARP is installed but not connected${NC}"
+            fi
+            return 0
+        else
+            echo -e "${YELLOW}⚠ warp-go service is not running${NC}"
+            return 1
+        fi
+    # Check for warp-cli (official package)
+    elif command -v warp-cli >/dev/null 2>&1; then
+        echo -e "${GREEN}✓ warp-cli is installed${NC}"
+        if systemctl is-active --quiet warp-svc 2>/dev/null; then
+            echo -e "${GREEN}✓ warp-svc service is running${NC}"
+            
+            # Check connection status
+            local warp_status=$(warp-cli --accept-tos status 2>/dev/null | grep -i "status" | head -1)
+            echo -e "${YELLOW}WARP Status: $warp_status${NC}"
+            return 0
+        else
+            echo -e "${YELLOW}⚠ warp-svc service is not running${NC}"
+            return 1
+        fi
+    else
         echo -e "${RED}✗ WARP is not installed${NC}"
         return 1
     fi
-    
-    if ! systemctl is-active --quiet warp-go 2>/dev/null; then
-        echo -e "${YELLOW}⚠ WARP service is not running${NC}"
-        echo -e "${YELLOW}Trying to start WARP service...${NC}"
-        systemctl start warp-go 2>/dev/null
-        sleep 3
-    fi
-    
-    if systemctl is-active --quiet warp-go 2>/dev/null; then
-        echo -e "${GREEN}✓ WARP service is running${NC}"
-        
-        # Check IPv4 WARP
-        echo -e "${YELLOW}Testing IPv4 WARP connection...${NC}"
-        local warp_ipv4_status=$(curl -s4 --max-time 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep warp | cut -d= -f2)
-        if [[ "$warp_ipv4_status" == "on" ]] || [[ "$warp_ipv4_status" == "plus" ]]; then
-            local warp_ipv4=$(curl -s4 --max-time 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep ip= | cut -d= -f2)
-            echo -e "${GREEN}✓ WARP IPv4: Active ($warp_ipv4)${NC}"
-        else
-            echo -e "${YELLOW}⚠ WARP IPv4: Not active${NC}"
-        fi
-        
-        # Check IPv6 WARP
-        echo -e "${YELLOW}Testing IPv6 WARP connection...${NC}"
-        local warp_ipv6_status=$(curl -s6 --max-time 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep warp | cut -d= -f2)
-        if [[ "$warp_ipv6_status" == "on" ]] || [[ "$warp_ipv6_status" == "plus" ]]; then
-            local warp_ipv6=$(curl -s6 --max-time 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep ip= | cut -d= -f2)
-            echo -e "${GREEN}✓ WARP IPv6: Active ($warp_ipv6)${NC}"
-        else
-            echo -e "${YELLOW}⚠ WARP IPv6: Not active${NC}"
-        fi
-        
-        # Test connectivity through WARP
-        echo -e "${YELLOW}Testing connectivity through WARP...${NC}"
-        if curl -s4 --max-time 5 https://1.1.1.1 >/dev/null 2>&1; then
-            echo -e "${GREEN}✓ IPv4 Connectivity: OK${NC}"
-        else
-            echo -e "${RED}✗ IPv4 Connectivity: Failed${NC}"
-        fi
-        
-        if curl -s6 --max-time 5 https://[2606:4700:4700::1111] >/dev/null 2>&1; then
-            echo -e "${GREEN}✓ IPv6 Connectivity: OK${NC}"
-        else
-            echo -e "${YELLOW}⚠ IPv6 Connectivity: Failed (may be normal if IPv6 not available)${NC}"
-        fi
-        
-        return 0
-    else
-        echo -e "${RED}✗ WARP service failed to start${NC}"
-        systemctl status warp-go --no-pager | tail -20
-        return 1
-    fi
-}
-
-# TUN Configuration
-tun(){
-if [[ $vi = openvz ]]; then
-TUN=$(cat /dev/net/tun 2>&1)
-if [[ ! $TUN =~ 'in bad state' ]] && [[ ! $TUN =~ '处于错误状态' ]] && [[ ! $TUN =~ 'Die Dateizugriffsnummer ist in schlechter Verfassung' ]]; then 
-red "TUN not detected, attempting to add TUN support" && sleep 4
-cd /dev && mkdir net && mknod net/tun c 10 200 && chmod 0666 net/tun
-TUN=$(cat /dev/net/tun 2>&1)
-if [[ ! $TUN =~ 'in bad state' ]] && [[ ! $TUN =~ '处于错误状态' ]] && [[ ! $TUN =~ 'Die Dateizugriffsnummer ist in schlechter Verfassung' ]]; then 
-green "Failed to add TUN support, contact VPS provider or enable from backend" && exit
-else
-echo '#!/bin/bash' > /root/tun.sh && echo 'cd /dev && mkdir net && mknod net/tun c 10 200 && chmod 0666 net/tun' >> /root/tun.sh && chmod +x /root/tun.sh
-grep -qE "^ *@reboot root bash /root/tun.sh >/dev/null 2>&1" /etc/crontab || echo "@reboot root bash /root/tun.sh >/dev/null 2>&1" >> /etc/crontab
-green "TUN daemon started"
-fi
-fi
-fi
-}
-
-# Netflix Tests
-nf4(){
-UA_Browser="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.87 Safari/537.36"
-result=$(curl -4fsL --user-agent "${UA_Browser}" --write-out %{http_code} --output /dev/null --max-time 10 "https://www.netflix.com/title/70143836" 2>&1)
-if [[ "$result" == "404" ]]; then 
-NF="Regret, current IP only unlocks Netflix original series"
-elif [[ "$result" == "403" ]]; then
-NF="Bad news, current IP cannot access Netflix"
-elif [[ "$result" == "200" ]]; then
-NF="Congratulations, current IP fully unlocks Netflix non-original series"
-else
-NF="Give up, Netflix does not serve current IP region"
-fi
-}
-
-nf6(){
-UA_Browser="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.87 Safari/537.36"
-result=$(curl -6fsL --user-agent "${UA_Browser}" --write-out %{http_code} --output /dev/null --max-time 10 "https://www.netflix.com/title/70143836" 2>&1)
-if [[ "$result" == "404" ]]; then 
-NF="Regret, current IP only unlocks Netflix original series"
-elif [[ "$result" == "403" ]]; then
-NF="Bad news, current IP cannot access Netflix"
-elif [[ "$result" == "200" ]]; then
-NF="Congratulations, current IP fully unlocks Netflix non-original series"
-else
-NF="Give up, Netflix does not serve current IP region"
-fi
-}
-
-# Get IPv4 and IPv6
-v4v6(){
-v4=$(curl -s4m5 icanhazip.com -k)
-v6=$(curl -s6m5 icanhazip.com -k)
-}
-
-# Check WGCF
-checkwgcf(){
-wgcfv6=$(curl -s6m5 https://www.cloudflare.com/cdn-cgi/trace -k | grep warp | cut -d= -f2) 
-wgcfv4=$(curl -s4m5 https://www.cloudflare.com/cdn-cgi/trace -k | grep warp | cut -d= -f2) 
-}
-
-# WARP IP
-warpip(){
-mkdir -p /root/warpip
-v4v6
-if [[ -z $v4 ]]; then
-endpoint=[2606:4700:d0::a29f:c001]:2408
-else
-endpoint=162.159.192.1:2408
-fi
-}
-
-# MTU for WARP
-mtuwarp(){
-v4v6
-yellow "Starting automatic setting of WARP MTU for optimal network throughput!"
-MTUy=1500
-MTUc=10
-if [[ -n $v6 && -z $v4 ]]; then
-ping='ping6'
-IP1='2606:4700:4700::1111'
-IP2='2001:4860:4860::8888'
-else
-ping='ping'
-IP1='1.1.1.1'
-IP2='8.8.8.8'
-fi
-while true; do
-if ${ping} -c1 -W1 -s$((${MTUy} - 28)) -Mdo ${IP1} >/dev/null 2>&1 || ${ping} -c1 -W1 -s$((${MTUy} - 28)) -Mdo ${IP2} >/dev/null 2>&1; then
-MTUc=1
-MTUy=$((${MTUy} + ${MTUc}))
-else
-MTUy=$((${MTUy} - ${MTUc}))
-[[ ${MTUc} = 1 ]] && break
-fi
-[[ ${MTUy} -le 1360 ]] && MTUy='1360' && break
-done
-MTU=$((${MTUy} - 80))
-green "MTU optimal network throughput value = $MTU has been set"
 }
 
 # Enhanced WARP Installation
 install_warp_cloudflare() {
-    echo -e "${YELLOW}Installing Cloudflare WARP (from official source)...${NC}"
+    echo -e "${YELLOW}Installing Cloudflare WARP...${NC}"
     print_separator
     
     # Check if already installed
-    if command -v warp-go >/dev/null 2>&1; then
+    if command -v warp-go >/dev/null 2>&1 || command -v warp-cli >/dev/null 2>&1; then
         echo -e "${YELLOW}WARP is already installed.${NC}"
         read -p "Do you want to reinstall? (yes/no): " reinstall
         if [[ "$reinstall" != "yes" ]] && [[ "$reinstall" != "y" ]]; then
@@ -1927,136 +1795,155 @@ install_warp_cloudflare() {
             return
         fi
         echo -e "${YELLOW}Removing existing WARP installation...${NC}"
-        systemctl stop warp-go 2>/dev/null
-        systemctl disable warp-go 2>/dev/null
-        rm -f /usr/local/bin/warp-go
-        rm -f /usr/local/bin/warp.conf
-        rm -f /lib/systemd/system/warp-go.service
+        remove_warp
     fi
     
-    # Check root
-    [[ $EUID -ne 0 ]] && yellow "Please run script as root" && exit
-    
-    # Detect OS
-    if [[ -f /etc/redhat-release ]]; then
-        release="Centos"
-    elif cat /etc/issue | grep -q -E -i "debian"; then
-        release="Debian"
-    elif cat /etc/issue | grep -q -E -i "ubuntu"; then
-        release="Ubuntu"
-    elif cat /etc/issue | grep -q -E -i "centos|red hat|redhat"; then
-        release="Centos"
-    elif cat /proc/version | grep -q -E -i "debian"; then
-        release="Debian"
-    elif cat /proc/version | grep -q -E -i "ubuntu"; then
-        release="Ubuntu"
-    elif cat /proc/version | grep -q -E -i "centos|red hat|redhat"; then
-        release="Centos"
-    else 
-        red "Current system not supported, please use Ubuntu, Debian, Centos system." && exit
+    # Get CPU architecture
+    local cpu_arch=$(get_cpu_arch)
+    if [[ "$cpu_arch" == "unknown" ]]; then
+        echo -e "${RED}✗ Unsupported CPU architecture: $(uname -m)${NC}"
+        echo -e "${YELLOW}Supported architectures: x86_64, aarch64, armv7l${NC}"
+        return 1
     fi
     
-    vsid=$(grep -i version_id /etc/os-release | cut -d \" -f2 | cut -d . -f1)
-    op=$(cat /etc/redhat-release 2>/dev/null || cat /etc/os-release 2>/dev/null | grep -i pretty_name | cut -d \" -f2)
-    version=$(uname -r | cut -d "-" -f1)
-    main=$(uname -r | cut -d "." -f1)
-    minor=$(uname -r | cut -d "." -f2)
-    vi=$(systemd-detect-virt)
-    
-    case "$release" in
-        "Centos") yumapt='yum -y';;
-        "Ubuntu"|"Debian") yumapt="apt-get -y";;
-    esac
+    echo -e "${GREEN}CPU Architecture: $cpu_arch${NC}"
     
     # Install dependencies
     echo -e "${YELLOW}Installing dependencies...${NC}"
-    case $release in
+    detect_distro
+    case $DISTRO in
         ubuntu|debian)
             apt-get update
-            apt-get install -y curl wget screen iproute2 openresolv dnsutils iputils-ping
+            apt-get install -y curl wget iproute2 dnsutils iputils-ping
             ;;
-        centos|rhel|fedora)
+        centos|rhel|fedora|almalinux|rocky)
             if command -v dnf >/dev/null 2>&1; then
-                dnf install -y curl wget screen iproute
+                dnf install -y curl wget iproute
             else
-                yum install -y curl wget screen iproute
+                yum install -y curl wget iproute
             fi
             ;;
         *)
-            echo -e "${YELLOW}Unknown distribution, trying to install common dependencies...${NC}"
+            echo -e "${YELLOW}Unknown distribution, trying common package managers...${NC}"
             if command -v apt-get >/dev/null 2>&1; then
-                apt-get update && apt-get install -y curl wget screen iproute2
+                apt-get update && apt-get install -y curl wget iproute2
             elif command -v yum >/dev/null 2>&1; then
-                yum install -y curl wget screen iproute
+                yum install -y curl wget iproute
+            elif command -v dnf >/dev/null 2>&1; then
+                dnf install -y curl wget iproute
+            else
+                echo -e "${RED}✗ Cannot install dependencies - no package manager found${NC}"
+                return 1
             fi
             ;;
     esac
-    
-    # Check TUN
-    tun
-    
-    # Get CPU architecture
-    case $(uname -m) in
-        aarch64) cpu=arm64;;
-        x86_64) cpu=amd64;;
-        *) red "Script currently does not support $(uname -m) architecture" && exit;;
-    esac
-    
-    echo -e "${GREEN}CPU Architecture: $cpu${NC}"
     
     # Create temporary directory
     local temp_dir=$(mktemp -d)
     cd "$temp_dir"
     
-    # Download and install warp-go from official source
-    echo -e "${YELLOW}Downloading WARP-GO...${NC}"
+    # Try to install from official Cloudflare repository first
+    echo -e "${YELLOW}Attempting to install from official repository...${NC}"
+    local repo_installed=false
     
-    # Try multiple sources for warp-go
-    local warp_go_downloaded=false
-    
-    # Try source 1: GitHub
-    if wget -q --timeout=10 --tries=3 -O warp-go "https://github.com/fscarmen/warp/releases/latest/download/warp-go_linux_$cpu"; then
-        chmod +x warp-go
-        mv warp-go /usr/local/bin/warp-go
-        warp_go_downloaded=true
-        echo -e "${GREEN}✓ Downloaded WARP-GO from GitHub${NC}"
-    else
-        echo -e "${YELLOW}⚠ GitHub download failed, trying alternative source...${NC}"
-        
-        # Try source 2: GitLab
-        if wget -q --timeout=10 --tries=3 -O warp-go "https://gitlab.com/rwkgyg/CFwarp/-/raw/main/warp-go_1.0.8_linux_$cpu"; then
-            chmod +x warp-go
-            mv warp-go /usr/local/bin/warp-go
-            warp_go_downloaded=true
-            echo -e "${GREEN}✓ Downloaded WARP-GO from GitLab${NC}"
-        else
-            echo -e "${YELLOW}⚠ GitLab download failed, trying backup source...${NC}"
-            
-            # Try source 3: Direct download
-            if wget -q --timeout=15 --tries=3 -O warp-go "https://cdn.jsdelivr.net/gh/fscarmen/warp/warp-go_linux_$cpu"; then
-                chmod +x warp-go
-                mv warp-go /usr/local/bin/warp-go
-                warp_go_downloaded=true
-                echo -e "${GREEN}✓ Downloaded WARP-GO from CDN${NC}"
+    if [[ "$DISTRO" == "ubuntu" || "$DISTRO" == "debian" ]]; then
+        # Ubuntu/Debian
+        if curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg 2>/dev/null; then
+            echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null 2>&1
+            apt-get update && apt-get install -y cloudflare-warp 2>/dev/null
+            if command -v warp-cli >/dev/null 2>&1; then
+                repo_installed=true
+                echo -e "${GREEN}✓ Installed from official repository${NC}"
+            fi
+        fi
+    elif [[ "$DISTRO" == "centos" || "$DISTRO" == "rhel" || "$DISTRO" == "fedora" || "$DISTRO" == "almalinux" || "$DISTRO" == "rocky" ]]; then
+        # RHEL/CentOS/Fedora
+        if curl -fsSL https://pkg.cloudflareclient.com/cloudflare-warp-ascii.repo | tee /etc/yum.repos.d/cloudflare-warp.repo >/dev/null 2>&1; then
+            if command -v dnf >/dev/null 2>&1; then
+                dnf install -y cloudflare-warp 2>/dev/null
+            else
+                yum install -y cloudflare-warp 2>/dev/null
+            fi
+            if command -v warp-cli >/dev/null 2>&1; then
+                repo_installed=true
+                echo -e "${GREEN}✓ Installed from official repository${NC}"
             fi
         fi
     fi
     
-    if [ "$warp_go_downloaded" = false ]; then
-        echo -e "${RED}✗ Failed to download WARP-GO from all sources!${NC}"
+    if [ "$repo_installed" = true ]; then
+        # Setup warp-cli
+        echo -e "${YELLOW}Setting up WARP...${NC}"
+        systemctl start warp-svc 2>/dev/null
+        systemctl enable warp-svc 2>/dev/null
+        sleep 2
+        
+        warp-cli --accept-tos register 2>/dev/null
+        warp-cli --accept-tos set-mode proxy 2>/dev/null
+        warp-cli --accept-tos connect 2>/dev/null
+        
+        echo -e "${GREEN}✓ WARP installed successfully via official package${NC}"
+        cd /
+        rm -rf "$temp_dir"
+        
+        # Wait and check status
+        sleep 3
+        check_warp_status
+        return 0
+    fi
+    
+    # Fallback to warp-go binary
+    echo -e "${YELLOW}Official repository failed, trying warp-go binary...${NC}"
+    
+    # Download warp-go
+    local warpgo_url=""
+    if [[ "$cpu_arch" == "amd64" ]]; then
+        warpgo_url="https://github.com/fscarmen/warp/releases/latest/download/warp-go_linux_amd64"
+    elif [[ "$cpu_arch" == "arm64" ]]; then
+        warpgo_url="https://github.com/fscarmen/warp/releases/latest/download/warp-go_linux_arm64"
+    elif [[ "$cpu_arch" == "arm" ]]; then
+        warpgo_url="https://github.com/fscarmen/warp/releases/latest/download/warp-go_linux_armv7"
+    fi
+    
+    if [ -z "$warpgo_url" ]; then
+        echo -e "${RED}✗ No warp-go binary available for $cpu_arch${NC}"
+        cd /
         rm -rf "$temp_dir"
         return 1
     fi
     
-    # Register WARP account
-    echo -e "${YELLOW}Registering WARP account...${NC}"
-    /usr/local/bin/warp-go --register --config=/usr/local/bin/warp.conf > /tmp/warp-register.log 2>&1
+    echo -e "${YELLOW}Downloading warp-go from: $warpgo_url${NC}"
+    if ! wget -q --timeout=30 --tries=3 -O warp-go "$warpgo_url"; then
+        echo -e "${RED}✗ Failed to download warp-go${NC}"
+        cd /
+        rm -rf "$temp_dir"
+        return 1
+    fi
     
-    if [ ! -f /usr/local/bin/warp.conf ]; then
-        echo -e "${YELLOW}Creating WARP configuration manually...${NC}"
-        
-        # Generate configuration
-        cat > /usr/local/bin/warp.conf <<EOF
+    # Verify and install binary
+    if [ ! -s warp-go ]; then
+        echo -e "${RED}✗ Downloaded file is empty${NC}"
+        cd /
+        rm -rf "$temp_dir"
+        return 1
+    fi
+    
+    # Make executable and test
+    chmod +x warp-go
+    if ! ./warp-go --version 2>/dev/null; then
+        echo -e "${RED}✗ Binary is not executable or corrupted${NC}"
+        echo -e "${YELLOW}Checking file type: $(file warp-go)${NC}"
+        cd /
+        rm -rf "$temp_dir"
+        return 1
+    fi
+    
+    # Install binary
+    mv warp-go /usr/local/bin/warp-go
+    
+    # Create configuration
+    echo -e "${YELLOW}Creating WARP configuration...${NC}"
+    cat > /usr/local/bin/warp.conf <<EOF
 [Account]
 Device = $(cat /proc/sys/kernel/random/uuid)
 PrivateKey = $(openssl rand -base64 32 | head -c 44)
@@ -2075,41 +1962,39 @@ KeepAlive = 30
 PostUp = 
 PostDown = 
 EOF
-    fi
-    
-    # Set optimal MTU
-    mtuwarp
-    sed -i "s/MTU.*/MTU = $MTU/g" /usr/local/bin/warp.conf
     
     # Create systemd service
     echo -e "${YELLOW}Creating systemd service...${NC}"
-    cat > /lib/systemd/system/warp-go.service <<EOF
+    cat > /etc/systemd/system/warp-go.service <<EOF
 [Unit]
 Description=Cloudflare WARP Service
 After=network.target
 Wants=network.target
-Documentation=https://developers.cloudflare.com/warp-client/
 
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/usr/local/bin
 ExecStart=/usr/local/bin/warp-go --config=/usr/local/bin/warp.conf
 Restart=always
 RestartSec=3
-Environment="LOG_LEVEL=info"
 LimitNOFILE=1000000
 
 [Install]
 WantedBy=multi-user.target
 EOF
     
+    # Register account
+    echo -e "${YELLOW}Registering WARP account...${NC}"
+    if ! /usr/local/bin/warp-go --register --config=/usr/local/bin/warp.conf > /tmp/warp-register.log 2>&1; then
+        echo -e "${YELLOW}⚠ Registration failed, using existing configuration${NC}"
+    fi
+    
     # Enable and start service
     systemctl daemon-reload
     systemctl enable warp-go
     systemctl start warp-go
     
-    # Wait for service to start
+    # Wait for service
     echo -e "${YELLOW}Waiting for WARP to start...${NC}"
     for i in {1..10}; do
         if systemctl is-active --quiet warp-go; then
@@ -2128,46 +2013,23 @@ EOF
     if systemctl is-active --quiet warp-go; then
         echo -e "${GREEN}✓ WARP installation completed!${NC}"
         
-        # Wait a bit for connection to establish
+        # Wait for connection
         sleep 5
         
-        # Configure routing for all traffic
-        echo -e "${YELLOW}Configuring routing for all traffic...${NC}"
-        
-        # Get current IPs
-        local current_ipv4=$(ip -4 addr show scope global | grep inet | awk '{print $2}' | cut -d/ -f1 | head -n1)
-        local current_ipv6=$(ip -6 addr show scope global | grep inet6 | awk '{print $2}' | cut -d/ -f1 | head -n1)
-        
-        # Add IP rules (only if we have IPs)
-        if [ -n "$current_ipv4" ]; then
-            ip rule add from $current_ipv4 lookup main 2>/dev/null && \
-            echo -e "${GREEN}✓ IPv4 routing configured${NC}" || \
-            echo -e "${YELLOW}⚠ IPv4 routing configuration skipped${NC}"
+        # Test connection
+        echo -e "${YELLOW}Testing WARP connection...${NC}"
+        if curl -s4 --max-time 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q "warp=on"; then
+            echo -e "${GREEN}✓ WARP is connected and working${NC}"
+        else
+            echo -e "${YELLOW}⚠ WARP is running but may not be connected${NC}"
         fi
         
-        if [ -n "$current_ipv6" ]; then
-            ip -6 rule add from $current_ipv6 lookup main 2>/dev/null && \
-            echo -e "${GREEN}✓ IPv6 routing configured${NC}" || \
-            echo -e "${YELLOW}⚠ IPv6 routing configuration skipped${NC}"
-        fi
-        
-        # Create warpip directory
-        mkdir -p /root/warpip
-        
-        # Show final status
-        echo -e "${YELLOW}Final WARP status check...${NC}"
         check_warp_status
-        
-        echo -e "\n${GREEN}✅ Cloudflare WARP installation completed successfully!${NC}"
-        echo -e "${YELLOW}All traffic is now routed through Cloudflare WARP.${NC}"
-        echo -e "${BLUE}Configuration file: /usr/local/bin/warp.conf${NC}"
-        echo -e "${BLUE}Service: warp-go${NC}"
-        echo -e "${BLUE}Check status: systemctl status warp-go${NC}"
-        
+        return 0
     else
         echo -e "${RED}✗ Failed to start WARP service${NC}"
         echo -e "${YELLOW}Checking logs...${NC}"
-        journalctl -u warp-go --no-pager -n 20
+        journalctl -u warp-go --no-pager -n 10
         return 1
     fi
 }
@@ -2181,19 +2043,38 @@ remove_warp() {
     
     echo -e "${YELLOW}Removing Cloudflare WARP...${NC}"
     
-    # Stop and disable service
+    # Stop and remove warp-go
     systemctl stop warp-go 2>/dev/null
     systemctl disable warp-go 2>/dev/null
-    
-    # Remove files
     rm -f /usr/local/bin/warp-go
     rm -f /usr/local/bin/warp.conf
-    rm -f /lib/systemd/system/warp-go.service
+    rm -f /etc/systemd/system/warp-go.service
+    rm -f /lib/systemd/system/warp-go.service 2>/dev/null
+    
+    # Stop and remove warp-cli (official package)
+    systemctl stop warp-svc 2>/dev/null
+    systemctl disable warp-svc 2>/dev/null
+    
+    # Remove official package if installed
+    if command -v apt-get >/dev/null 2>&1 && dpkg -l | grep -q cloudflare-warp; then
+        apt-get remove --purge -y cloudflare-warp 2>/dev/null
+        rm -f /etc/apt/sources.list.d/cloudflare-client.list
+        rm -f /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+    elif command -v yum >/dev/null 2>&1 && rpm -qa | grep -q cloudflare-warp; then
+        yum remove -y cloudflare-warp 2>/dev/null
+        rm -f /etc/yum.repos.d/cloudflare-warp.repo
+    elif command -v dnf >/dev/null 2>&1 && rpm -qa | grep -q cloudflare-warp; then
+        dnf remove -y cloudflare-warp 2>/dev/null
+        rm -f /etc/yum.repos.d/cloudflare-warp.repo
+    fi
+    
+    # Cleanup files
     rm -f /root/WARP-UP.sh 2>/dev/null
     rm -rf /root/warpip 2>/dev/null
     
     # Remove cron jobs
     crontab -l 2>/dev/null | grep -v warp-go | crontab - 2>/dev/null
+    crontab -l 2>/dev/null | grep -v warp-svc | crontab - 2>/dev/null
     
     # Reload systemd
     systemctl daemon-reload 2>/dev/null
@@ -2225,28 +2106,50 @@ manage_warp() {
                 ;;
             3)
                 echo -e "${YELLOW}Restarting WARP service...${NC}"
-                if systemctl restart warp-go 2>/dev/null; then
-                    echo -e "${GREEN}✓ WARP service restarted${NC}"
-                    sleep 3
-                    check_warp_status
-                else
-                    echo -e "${RED}✗ Failed to restart WARP service${NC}"
+                if command -v warp-go >/dev/null 2>&1; then
+                    if systemctl restart warp-go 2>/dev/null; then
+                        echo -e "${GREEN}✓ warp-go service restarted${NC}"
+                    else
+                        echo -e "${RED}✗ Failed to restart warp-go${NC}"
+                    fi
+                elif command -v warp-cli >/dev/null 2>&1; then
+                    if systemctl restart warp-svc 2>/dev/null; then
+                        echo -e "${GREEN}✓ warp-svc service restarted${NC}"
+                    else
+                        echo -e "${RED}✗ Failed to restart warp-svc${NC}"
+                    fi
                 fi
+                sleep 3
+                check_warp_status
                 ;;
             4)
                 echo -e "${YELLOW}Stopping WARP service...${NC}"
-                if systemctl stop warp-go 2>/dev/null; then
-                    echo -e "${GREEN}✓ WARP service stopped${NC}"
-                else
-                    echo -e "${RED}✗ Failed to stop WARP service${NC}"
+                if command -v warp-go >/dev/null 2>&1; then
+                    if systemctl stop warp-go 2>/dev/null; then
+                        echo -e "${GREEN}✓ warp-go service stopped${NC}"
+                    else
+                        echo -e "${RED}✗ Failed to stop warp-go${NC}"
+                    fi
+                elif command -v warp-cli >/dev/null 2>&1; then
+                    if systemctl stop warp-svc 2>/dev/null; then
+                        echo -e "${GREEN}✓ warp-svc service stopped${NC}"
+                    else
+                        echo -e "${RED}✗ Failed to stop warp-svc${NC}"
+                    fi
                 fi
                 ;;
             5)
                 remove_warp
                 ;;
             6)
-                echo -e "${YELLOW}Showing last 20 lines of WARP logs...${NC}"
-                journalctl -u warp-go --no-pager -n 20
+                echo -e "${YELLOW}Showing WARP logs...${NC}"
+                if command -v warp-go >/dev/null 2>&1; then
+                    journalctl -u warp-go --no-pager -n 20
+                elif command -v warp-cli >/dev/null 2>&1; then
+                    journalctl -u warp-svc --no-pager -n 20
+                else
+                    echo -e "${RED}WARP is not installed${NC}"
+                fi
                 ;;
             7)
                 return
