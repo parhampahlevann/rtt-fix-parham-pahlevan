@@ -1393,7 +1393,7 @@ find_best_mtu() {
     fi
     
     read -p "Apply this MTU? (yes/no): " apply_mtu
-    if [[ "$apply_mtu" == "yes" ]] || [[ "$apply_mtu" == "y" ]; then
+    if [[ "$apply_mtu" == "yes" ]] || [[ "$apply_mtu" == "y" ]]; then
         configure_mtu "$best_mtu"
         echo -e "${GREEN}✓ Best MTU ($best_mtu) has been applied!${NC}"
     else
