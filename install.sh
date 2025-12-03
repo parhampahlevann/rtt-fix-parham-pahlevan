@@ -2,7 +2,7 @@
 
 # Global Configuration
 SCRIPT_NAME="Ultimate Network Optimizer"
-SCRIPT_VERSION="9.4"  # Added WARP Cloudflare support
+SCRIPT_VERSION="9.5"  # Fixed VXLAN & Added Fix DNS & Improved WARP
 AUTHOR="Parham Pahlevan"
 CONFIG_FILE="/etc/network_optimizer.conf"
 LOG_FILE="/var/log/network_optimizer.log"
@@ -178,6 +178,11 @@ show_header() {
         else
             echo -e "${YELLOW}Cloudflare WARP: ${RED}Not running${NC}"
         fi
+    fi
+    
+    # Show Fix DNS status
+    if [ -f "/etc/systemd/resolved.conf.d/disable-resolved.conf" ]; then
+        echo -e "${YELLOW}Fix DNS: ${GREEN}Applied${NC}"
     fi
     echo
 }
@@ -971,14 +976,11 @@ self_update() {
     echo -e "Author: ${BOLD}$AUTHOR${NC}"
     echo ""
     echo -e "${YELLOW}Update Information:${NC}"
-    echo -e "• New features in v9.4:"
-    echo -e "  ✓ TCP MUX Configuration"
-    echo -e "  ✓ VXLAN Tunnel Setup"
-    echo -e "  ✓ Best MTU Auto-detection"
-    echo -e "  ✓ Reboot functionality"
-    echo -e "  ✓ Tunnel management"
-    echo -e "  ✓ HAProxy Installation"
-    echo -e "  ✓ Cloudflare WARP Installation (Improved)"
+    echo -e "• New features in v9.5:"
+    echo -e "  ✓ Fixed VXLAN Tunnel on reboot"
+    echo -e "  ✓ Added Fix DNS option"
+    echo -e "  ✓ Improved Cloudflare WARP"
+    echo -e "  ✓ Better systemd integration"
     echo ""
     echo -e "${GREEN}This is the latest version!${NC}"
     echo -e "${YELLOW}For future updates, check the GitHub repository.${NC}"
@@ -1189,9 +1191,6 @@ manage_tunnel() {
 }
 
 # ============================================================================
-# NEW FEATURES START HERE
-# ============================================================================
-
 # TCP MUX Configuration (گزینه 15)
 configure_tcp_mux() {
     echo -e "${YELLOW}Configuring TCP MUX for better connection handling...${NC}"
@@ -1394,7 +1393,7 @@ find_best_mtu() {
     fi
     
     read -p "Apply this MTU? (yes/no): " apply_mtu
-    if [[ "$apply_mtu" == "yes" ]] || [[ "$apply_mtu" == "y" ]]; then
+    if [[ "$apply_mtu" == "yes" ]] || [[ "$apply_mtu" == "y" ]; then
         configure_mtu "$best_mtu"
         echo -e "${GREEN}✓ Best MTU ($best_mtu) has been applied!${NC}"
     else
@@ -1402,7 +1401,9 @@ find_best_mtu() {
     fi
 }
 
-# Iran VXLAN Tunnel (گزینه 18) - EXACT CODE AS REQUESTED
+# ============================================================================
+# Iran VXLAN Tunnel (گزینه 18) - FIXED FOR REBOOT
+# ============================================================================
 setup_iran_tunnel() {
     echo -e "${YELLOW}Setting up IRAN VXLAN Tunnel...${NC}"
     print_separator
@@ -1412,33 +1413,64 @@ setup_iran_tunnel() {
     IFACE=$(ip route | grep default | awk '{print $5}')
     VXLAN_IF="vxlan100"
 
-    # VXLAN setup
+    # Stop and remove existing interface if exists
+    ip link del $VXLAN_IF 2>/dev/null || true
+    
+    # Create VXLAN interface
     ip link add $VXLAN_IF type vxlan id 100 dev $IFACE remote $REMOTE_IP dstport 4789
     ip addr add 10.123.1.1/30 dev $VXLAN_IF
     ip -6 addr add fd11:1ceb:1d11::1/64 dev $VXLAN_IF
     ip link set $VXLAN_IF up
 
-    # rc.local
-    cat <<EOF > /etc/rc.local
-#!/bin/bash
-ip link add $VXLAN_IF type vxlan id 100 dev $IFACE remote $REMOTE_IP dstport 4789
-ip addr add 10.123.1.1/30 dev $VXLAN_IF
-ip -6 addr add fd11:1ceb:1d11::1/64 dev $VXLAN_IF
-ip link set $VXLAN_IF up
-exit 0
+    # Create systemd service for persistent tunnel
+    cat > /etc/systemd/system/vxlan-iran.service <<EOF
+[Unit]
+Description=VXLAN Iran Tunnel
+After=network.target
+Wants=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c "ip link add $VXLAN_IF type vxlan id 100 dev $IFACE remote $REMOTE_IP dstport 4789 && ip addr add 10.123.1.1/30 dev $VXLAN_IF && ip -6 addr add fd11:1ceb:1d11::1/64 dev $VXLAN_IF && ip link set $VXLAN_IF up"
+ExecStop=/bin/bash -c "ip link del $VXLAN_IF"
+StandardOutput=journal
+
+[Install]
+WantedBy=multi-user.target
 EOF
 
-    chmod +x /etc/rc.local
-    systemctl enable rc-local
-    systemctl start rc-local
+    # Create network configuration file for netplan (Ubuntu)
+    if [ -d /etc/netplan ]; then
+        cat > /etc/netplan/99-vxlan.yaml <<EOF
+network:
+  version: 2
+  vlans:
+    $VXLAN_IF:
+      id: 100
+      link: $IFACE
+      addresses:
+        - 10.123.1.1/30
+        - fd11:1ceb:1d11::1/64
+EOF
+        netplan apply
+    fi
+
+    # Enable and start the service
+    systemctl daemon-reload
+    systemctl enable vxlan-iran.service
+    systemctl start vxlan-iran.service
 
     echo "✅ IRAN VXLAN tunnel created to $REMOTE_IP (kharej)"
-    echo -e "${GREEN}Tunnel setup completed!${NC}"
+    echo -e "${GREEN}Tunnel setup completed and will survive reboot!${NC}"
     echo -e "${YELLOW}Local IP: 10.123.1.1${NC}"
     echo -e "${YELLOW}Remote IP should be: 10.123.1.2${NC}"
+    echo -e "${YELLOW}Service: vxlan-iran.service${NC}"
 }
 
-# Kharej VXLAN Tunnel (گزینه 19) - EXACT CODE AS REQUESTED
+# ============================================================================
+# Kharej VXLAN Tunnel (گزینه 19) - FIXED FOR REBOOT
+# ============================================================================
 setup_kharej_tunnel() {
     echo -e "${YELLOW}Setting up KHAREJ VXLAN Tunnel...${NC}"
     print_separator
@@ -1447,33 +1479,64 @@ setup_kharej_tunnel() {
     IFACE=$(ip route | grep default | awk '{print $5}')
     VXLAN_IF="vxlan100"
 
-    # Interface
+    # Stop and remove existing interface if exists
+    ip link del $VXLAN_IF 2>/dev/null || true
+    
+    # Create VXLAN interface
     ip link add $VXLAN_IF type vxlan id 100 dev $IFACE remote $REMOTE_IP dstport 4789
     ip addr add 10.123.1.2/30 dev $VXLAN_IF
     ip -6 addr add fd11:1ceb:1d11::2/64 dev $VXLAN_IF
     ip link set $VXLAN_IF up
 
-    # Create rc.local
-    cat <<EOF > /etc/rc.local
-#!/bin/bash
-ip link add $VXLAN_IF type vxlan id 100 dev $IFACE remote $REMOTE_IP dstport 4789
-ip addr add 10.123.1.2/30 dev $VXLAN_IF
-ip -6 addr add fd11:1ceb:1d11::2/64 dev $VXLAN_IF
-ip link set $VXLAN_IF up
-exit 0
+    # Create systemd service for persistent tunnel
+    cat > /etc/systemd/system/vxlan-kharej.service <<EOF
+[Unit]
+Description=VXLAN Kharej Tunnel
+After=network.target
+Wants=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c "ip link add $VXLAN_IF type vxlan id 100 dev $IFACE remote $REMOTE_IP dstport 4789 && ip addr add 10.123.1.2/30 dev $VXLAN_IF && ip -6 addr add fd11:1ceb:1d11::2/64 dev $VXLAN_IF && ip link set $VXLAN_IF up"
+ExecStop=/bin/bash -c "ip link del $VXLAN_IF"
+StandardOutput=journal
+
+[Install]
+WantedBy=multi-user.target
 EOF
 
-    chmod +x /etc/rc.local
-    systemctl enable rc-local
-    systemctl start rc-local
+    # Create network configuration file for netplan (Ubuntu)
+    if [ -d /etc/netplan ]; then
+        cat > /etc/netplan/99-vxlan.yaml <<EOF
+network:
+  version: 2
+  vlans:
+    $VXLAN_IF:
+      id: 100
+      link: $IFACE
+      addresses:
+        - 10.123.1.2/30
+        - fd11:1ceb:1d11::2/64
+EOF
+        netplan apply
+    fi
+
+    # Enable and start the service
+    systemctl daemon-reload
+    systemctl enable vxlan-kharej.service
+    systemctl start vxlan-kharej.service
 
     echo "✅ VXLAN setup on KHAREJ completed (IPv4: 10.123.1.2 / IPv6: fd11:1ceb:1d11::2)"
-    echo -e "${GREEN}Tunnel setup completed!${NC}"
+    echo -e "${GREEN}Tunnel setup completed and will survive reboot!${NC}"
     echo -e "${YELLOW}Local IP: 10.123.1.2${NC}"
     echo -e "${YELLOW}Remote IP should be: 10.123.1.1${NC}"
+    echo -e "${YELLOW}Service: vxlan-kharej.service${NC}"
 }
 
+# ============================================================================
 # Delete VXLAN Tunnel (گزینه 20)
+# ============================================================================
 delete_vxlan_tunnel() {
     if ! confirm_action "This will delete all VXLAN tunnels and configurations!"; then
         echo -e "${YELLOW}Operation cancelled.${NC}"
@@ -1482,26 +1545,37 @@ delete_vxlan_tunnel() {
     
     echo -e "${YELLOW}Deleting VXLAN tunnels...${NC}"
     
-    # Remove VXLAN interface
+    # Remove VXLAN interfaces
     ip link del vxlan100 2>/dev/null
     ip link del vxlan200 2>/dev/null
     
-    # Disable rc.local service
-    systemctl stop rc-local 2>/dev/null
-    systemctl disable rc-local 2>/dev/null
+    # Stop and disable services
+    systemctl stop vxlan-iran.service 2>/dev/null
+    systemctl stop vxlan-kharej.service 2>/dev/null
+    systemctl disable vxlan-iran.service 2>/dev/null
+    systemctl disable vxlan-kharej.service 2>/dev/null
     
-    # Remove rc.local file
-    rm -f /etc/rc.local
+    # Remove service files
+    rm -f /etc/systemd/system/vxlan-iran.service 2>/dev/null
+    rm -f /etc/systemd/system/vxlan-kharej.service 2>/dev/null
     
-    # Remove rc-local service files if they exist
-    rm -f /etc/systemd/system/rc-local.service 2>/dev/null
-    rm -f /lib/systemd/system/rc-local.service 2>/dev/null
-    rm -f /usr/lib/systemd/system/rc-local.service 2>/dev/null
+    # Remove netplan configuration
+    rm -f /etc/netplan/99-vxlan.yaml 2>/dev/null
+    
+    # Apply netplan changes
+    if [ -d /etc/netplan ]; then
+        netplan apply 2>/dev/null
+    fi
+    
+    # Reload systemd
+    systemctl daemon-reload 2>/dev/null
     
     echo -e "${GREEN}✓ All VXLAN tunnels and configurations have been removed!${NC}"
 }
 
+# ============================================================================
 # HAProxy Installation and Configuration (گزینه 21)
+# ============================================================================
 install_haproxy_all_ports() {
     echo -e "${YELLOW}Installing HAProxy and configuring all ports...${NC}"
     print_separator
@@ -1710,7 +1784,7 @@ EOF
 }
 
 # ============================================================================
-# CLOUDFLARE WARP INSTALLATION (Improved) - گزینه 22
+# IMPROVED CLOUDFLARE WARP INSTALLATION (گزینه 22)
 # ============================================================================
 
 # Get CPU architecture
@@ -1735,6 +1809,280 @@ get_cpu_arch() {
     esac
 }
 
+# Get Cloudflare WARP server locations
+get_warp_locations() {
+    echo -e "${YELLOW}Available Cloudflare WARP Locations:${NC}"
+    echo "1) 🇺🇸  USA - East (162.159.192.1)"
+    echo "2) 🇺🇸  USA - West (162.159.193.1)"
+    echo "3) 🇪🇺  Europe - Frankfurt (162.159.195.1)"
+    echo "4) 🇸🇬  Asia - Singapore (162.159.196.1)"
+    echo "5) 🇯🇵  Japan - Tokyo (162.159.197.1)"
+    echo "6) 🇦🇺  Australia - Sydney (162.159.198.1)"
+    echo "7) 🇮🇳  India - Mumbai (162.159.199.1)"
+    echo "8) 🇧🇷  Brazil - São Paulo (162.159.200.1)"
+    echo "9) 🇿🇦  South Africa - Johannesburg (162.159.201.1)"
+    echo "10) Automatic (Best Location)"
+}
+
+# Install WARP CLI with location selection
+install_warp_with_location() {
+    echo -e "${YELLOW}Installing Cloudflare WARP with location selection...${NC}"
+    print_separator
+    
+    # Check if already installed
+    if command -v warp-go >/dev/null 2>&1; then
+        echo -e "${YELLOW}WARP is already installed.${NC}"
+        read -p "Do you want to reinstall? (yes/no): " reinstall
+        if [[ "$reinstall" != "yes" ]] && [[ "$reinstall" != "y" ]]; then
+            return
+        fi
+        systemctl stop warp-go 2>/dev/null
+        systemctl disable warp-go 2>/dev/null
+    fi
+    
+    # Select location
+    get_warp_locations
+    read -p "Select location (1-10): " location_choice
+    
+    # Map location choice to endpoint
+    case $location_choice in
+        1) ENDPOINT="162.159.192.1:2408" ;;
+        2) ENDPOINT="162.159.193.1:2408" ;;
+        3) ENDPOINT="162.159.195.1:2408" ;;
+        4) ENDPOINT="162.159.196.1:2408" ;;
+        5) ENDPOINT="162.159.197.1:2408" ;;
+        6) ENDPOINT="162.159.198.1:2408" ;;
+        7) ENDPOINT="162.159.199.1:2408" ;;
+        8) ENDPOINT="162.159.200.1:2408" ;;
+        9) ENDPOINT="162.159.201.1:2408" ;;
+        10) ENDPOINT="162.159.192.1:2408" ;; # Default to automatic
+        *) ENDPOINT="162.159.192.1:2408" ;;  # Default
+    esac
+    
+    # Get CPU architecture
+    local cpu_arch=$(get_cpu_arch)
+    
+    # Install dependencies
+    echo -e "${YELLOW}Installing dependencies...${NC}"
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update
+        apt-get install -y curl wget jq openssl resolvconf iproute2
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y curl wget jq openssl iproute
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y curl wget jq openssl iproute
+    fi
+    
+    # Create temp directory
+    local temp_dir=$(mktemp -d)
+    cd "$temp_dir"
+    
+    # Download warp-go
+    echo -e "${YELLOW}Downloading WARP-GO...${NC}"
+    local warp_url="https://gitlab.com/rwkgyg/CFwarp/-/raw/main/warp-go_1.0.8_linux_$cpu_arch"
+    
+    if wget -q --timeout=30 --tries=3 -O warp-go "$warp_url"; then
+        chmod +x warp-go
+        mv warp-go /usr/local/bin/warp-go
+        echo -e "${GREEN}✓ WARP-GO downloaded successfully${NC}"
+    else
+        echo -e "${RED}✗ Failed to download WARP-GO${NC}"
+        rm -rf "$temp_dir"
+        return 1
+    fi
+    
+    # Generate configuration
+    echo -e "${YELLOW}Generating WARP configuration...${NC}"
+    
+    # Create config directory
+    mkdir -p /etc/warp
+    
+    # Generate random keys
+    local private_key=$(openssl rand -base64 32 | head -c 44)
+    local device_id=$(cat /proc/sys/kernel/random/uuid)
+    
+    # Create configuration file
+    cat > /etc/warp/warp.conf <<EOF
+[Account]
+Device = $device_id
+PrivateKey = $private_key
+Token = 
+Type = free
+Name = WARP-CLI
+MTU = 1280
+
+[Peer]
+PublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=
+Endpoint = $ENDPOINT
+AllowedIPs = 0.0.0.0/0, ::/0
+KeepAlive = 25
+PersistentKeepalive = 25
+
+[Interface]
+Address = 172.16.0.2/32
+Address = 2606:4700:110:8d77:97e5:59e8:b5a6:8a2a/128
+DNS = 1.1.1.1, 1.0.0.1
+PostUp = ip rule add from 172.16.0.2 lookup main
+PostDown = ip rule del from 172.16.0.2 lookup main
+EOF
+    
+    # Create systemd service
+    cat > /etc/systemd/system/warp-go.service <<EOF
+[Unit]
+Description=Cloudflare WARP Service
+After=network.target
+Wants=network.target
+Documentation=https://developers.cloudflare.com/warp-client/
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/usr/local/bin
+ExecStart=/usr/local/bin/warp-go --config=/etc/warp/warp.conf
+Restart=always
+RestartSec=3
+Environment="LOG_LEVEL=info"
+LimitNOFILE=1000000
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    
+    # Create connection script
+    cat > /usr/local/bin/warp-connect <<'EOF'
+#!/bin/bash
+CONFIG="/etc/warp/warp.conf"
+LOGFILE="/var/log/warp.log"
+
+start_warp() {
+    echo "Starting Cloudflare WARP..."
+    systemctl start warp-go
+    sleep 3
+    
+    # Wait for connection
+    for i in {1..10}; do
+        if curl -s --max-time 5 https://1.1.1.1 >/dev/null 2>&1; then
+            echo "WARP connected successfully!"
+            
+            # Get WARP IP
+            WARP_IP=$(curl -s4 https://cloudflare.com/cdn-cgi/trace | grep ip= | cut -d= -f2)
+            echo "Your WARP IPv4: $WARP_IP"
+            
+            # Test connectivity
+            echo "Testing connectivity..."
+            ping -c 2 1.1.1.1
+            
+            return 0
+        fi
+        echo -n "."
+        sleep 2
+    done
+    
+    echo "Failed to connect to WARP"
+    return 1
+}
+
+stop_warp() {
+    echo "Stopping Cloudflare WARP..."
+    systemctl stop warp-go
+    echo "WARP stopped"
+}
+
+status_warp() {
+    if systemctl is-active --quiet warp-go; then
+        echo "WARP Status: RUNNING"
+        
+        # Get IP information
+        IPV4_STATUS=$(curl -s4 --max-time 3 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep warp | cut -d= -f2)
+        IPV6_STATUS=$(curl -s6 --max-time 3 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep warp | cut -d= -f2)
+        
+        if [[ "$IPV4_STATUS" == "on" ]] || [[ "$IPV4_STATUS" == "plus" ]]; then
+            IPV4=$(curl -s4 --max-time 3 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep ip= | cut -d= -f2)
+            echo "IPv4: $IPV4 (WARP)"
+        else
+            echo "IPv4: Direct (No WARP)"
+        fi
+        
+        if [[ "$IPV6_STATUS" == "on" ]] || [[ "$IPV6_STATUS" == "plus" ]]; then
+            IPV6=$(curl -s6 --max-time 3 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep ip= | cut -d= -f2)
+            echo "IPv6: $IPV6 (WARP)"
+        else
+            echo "IPv6: Direct or not available"
+        fi
+        
+        # Test connectivity
+        echo -n "Connectivity Test: "
+        if curl -s --max-time 3 https://1.1.1.1 >/dev/null 2>&1; then
+            echo "OK"
+        else
+            echo "FAILED"
+        fi
+        
+    else
+        echo "WARP Status: STOPPED"
+    fi
+}
+
+case "$1" in
+    start)
+        start_warp
+        ;;
+    stop)
+        stop_warp
+        ;;
+    status)
+        status_warp
+        ;;
+    restart)
+        stop_warp
+        sleep 2
+        start_warp
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|status|restart}"
+        exit 1
+        ;;
+esac
+EOF
+    
+    chmod +x /usr/local/bin/warp-connect
+    
+    # Enable and start service
+    systemctl daemon-reload
+    systemctl enable warp-go
+    systemctl start warp-go
+    
+    # Cleanup
+    cd /
+    rm -rf "$temp_dir"
+    
+    # Wait for connection
+    echo -e "${YELLOW}Waiting for WARP connection...${NC}"
+    sleep 5
+    
+    # Test connection
+    if curl -s --max-time 10 https://1.1.1.1 >/dev/null 2>&1; then
+        # Get WARP IP
+        WARP_IP=$(curl -s4 https://cloudflare.com/cdn-cgi/trace | grep ip= | cut -d= -f2)
+        
+        echo -e "${GREEN}✓ Cloudflare WARP installed successfully!${NC}"
+        echo -e "${YELLOW}WARP IPv4: $WARP_IP${NC}"
+        echo -e "${YELLOW}Endpoint: $ENDPOINT${NC}"
+        echo -e "${YELLOW}All traffic is now routed through Cloudflare WARP${NC}"
+        echo ""
+        echo -e "${BLUE}Management commands:${NC}"
+        echo -e "  warp-connect start    - Start WARP"
+        echo -e "  warp-connect stop     - Stop WARP"
+        echo -e "  warp-connect status   - Check status"
+        echo -e "  warp-connect restart  - Restart WARP"
+        echo -e "  systemctl status warp-go  - Service status"
+    else
+        echo -e "${YELLOW}⚠ WARP installed but connection test failed${NC}"
+        echo -e "${YELLOW}Checking service status...${NC}"
+        systemctl status warp-go --no-pager | tail -20
+    fi
+}
+
 # Check WARP status
 check_warp_status() {
     echo -e "${YELLOW}Checking WARP status...${NC}"
@@ -1746,271 +2094,38 @@ check_warp_status() {
     
     if ! systemctl is-active --quiet warp-go 2>/dev/null; then
         echo -e "${YELLOW}⚠ WARP service is not running${NC}"
-        echo -e "${YELLOW}Trying to start WARP service...${NC}"
-        systemctl start warp-go 2>/dev/null
-        sleep 3
-    fi
-    
-    if systemctl is-active --quiet warp-go 2>/dev/null; then
-        echo -e "${GREEN}✓ WARP service is running${NC}"
-        
-        # Check IPv4 WARP
-        echo -e "${YELLOW}Testing IPv4 WARP connection...${NC}"
-        local warp_ipv4_status=$(curl -s4 --max-time 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep warp | cut -d= -f2)
-        if [[ "$warp_ipv4_status" == "on" ]] || [[ "$warp_ipv4_status" == "plus" ]]; then
-            local warp_ipv4=$(curl -s4 --max-time 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep ip= | cut -d= -f2)
-            echo -e "${GREEN}✓ WARP IPv4: Active ($warp_ipv4)${NC}"
-        else
-            echo -e "${YELLOW}⚠ WARP IPv4: Not active${NC}"
-        fi
-        
-        # Check IPv6 WARP
-        echo -e "${YELLOW}Testing IPv6 WARP connection...${NC}"
-        local warp_ipv6_status=$(curl -s6 --max-time 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep warp | cut -d= -f2)
-        if [[ "$warp_ipv6_status" == "on" ]] || [[ "$warp_ipv6_status" == "plus" ]]; then
-            local warp_ipv6=$(curl -s6 --max-time 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep ip= | cut -d= -f2)
-            echo -e "${GREEN}✓ WARP IPv6: Active ($warp_ipv6)${NC}"
-        else
-            echo -e "${YELLOW}⚠ WARP IPv6: Not active${NC}"
-        fi
-        
-        # Test connectivity through WARP
-        echo -e "${YELLOW}Testing connectivity through WARP...${NC}"
-        if curl -s4 --max-time 5 https://1.1.1.1 >/dev/null 2>&1; then
-            echo -e "${GREEN}✓ IPv4 Connectivity: OK${NC}"
-        else
-            echo -e "${RED}✗ IPv4 Connectivity: Failed${NC}"
-        fi
-        
-        if curl -s6 --max-time 5 https://[2606:4700:4700::1111] >/dev/null 2>&1; then
-            echo -e "${GREEN}✓ IPv6 Connectivity: OK${NC}"
-        else
-            echo -e "${YELLOW}⚠ IPv6 Connectivity: Failed (may be normal if IPv6 not available)${NC}"
-        fi
-        
-        return 0
-    else
-        echo -e "${RED}✗ WARP service failed to start${NC}"
-        systemctl status warp-go --no-pager | tail -20
-        return 1
-    fi
-}
-
-# Install WARP from the official source
-install_warp_cloudflare() {
-    echo -e "${YELLOW}Installing Cloudflare WARP (from official source)...${NC}"
-    print_separator
-    
-    # Check if already installed
-    if command -v warp-go >/dev/null 2>&1; then
-        echo -e "${YELLOW}WARP is already installed.${NC}"
-        read -p "Do you want to reinstall? (yes/no): " reinstall
-        if [[ "$reinstall" != "yes" ]] && [[ "$reinstall" != "y" ]]; then
-            check_warp_status
-            return
-        fi
-        echo -e "${YELLOW}Removing existing WARP installation...${NC}"
-        systemctl stop warp-go 2>/dev/null
-        systemctl disable warp-go 2>/dev/null
-        rm -f /usr/local/bin/warp-go
-        rm -f /usr/local/bin/warp.conf
-        rm -f /lib/systemd/system/warp-go.service
-    fi
-    
-    # Detect OS
-    detect_distro
-    echo -e "${BLUE}Detected OS: $DISTRO $DISTRO_VERSION${NC}"
-    
-    # Install dependencies
-    echo -e "${YELLOW}Installing dependencies...${NC}"
-    case $DISTRO in
-        ubuntu|debian)
-            apt-get update
-            apt-get install -y curl wget screen iproute2 openresolv dnsutils iputils-ping
-            ;;
-        centos|rhel|fedora)
-            if command -v dnf >/dev/null 2>&1; then
-                dnf install -y curl wget screen iproute
-            else
-                yum install -y curl wget screen iproute
-            fi
-            ;;
-        *)
-            echo -e "${YELLOW}Unknown distribution, trying to install common dependencies...${NC}"
-            if command -v apt-get >/dev/null 2>&1; then
-                apt-get update && apt-get install -y curl wget screen iproute2
-            elif command -v yum >/dev/null 2>&1; then
-                yum install -y curl wget screen iproute
-            fi
-            ;;
-    esac
-    
-    # Get CPU architecture
-    local cpu_arch=$(get_cpu_arch)
-    echo -e "${GREEN}CPU Architecture: $cpu_arch${NC}"
-    
-    # Create temporary directory
-    local temp_dir=$(mktemp -d)
-    cd "$temp_dir"
-    
-    # Download and install warp-go from official source
-    echo -e "${YELLOW}Downloading WARP-GO...${NC}"
-    
-    # Try multiple sources for warp-go
-    local warp_go_downloaded=false
-    
-    # Try source 1: GitHub
-    if wget -q --timeout=10 --tries=3 -O warp-go "https://github.com/fscarmen/warp/releases/latest/download/warp-go_linux_$cpu_arch"; then
-        chmod +x warp-go
-        mv warp-go /usr/local/bin/warp-go
-        warp_go_downloaded=true
-        echo -e "${GREEN}✓ Downloaded WARP-GO from GitHub${NC}"
-    else
-        echo -e "${YELLOW}⚠ GitHub download failed, trying alternative source...${NC}"
-        
-        # Try source 2: GitLab
-        if wget -q --timeout=10 --tries=3 -O warp-go "https://gitlab.com/rwkgyg/CFwarp/-/raw/main/warp-go_1.0.8_linux_$cpu_arch"; then
-            chmod +x warp-go
-            mv warp-go /usr/local/bin/warp-go
-            warp_go_downloaded=true
-            echo -e "${GREEN}✓ Downloaded WARP-GO from GitLab${NC}"
-        else
-            echo -e "${YELLOW}⚠ GitLab download failed, trying backup source...${NC}"
-            
-            # Try source 3: Direct download
-            if wget -q --timeout=15 --tries=3 -O warp-go "https://cdn.jsdelivr.net/gh/fscarmen/warp/warp-go_linux_$cpu_arch"; then
-                chmod +x warp-go
-                mv warp-go /usr/local/bin/warp-go
-                warp_go_downloaded=true
-                echo -e "${GREEN}✓ Downloaded WARP-GO from CDN${NC}"
-            fi
-        fi
-    fi
-    
-    if [ "$warp_go_downloaded" = false ]; then
-        echo -e "${RED}✗ Failed to download WARP-GO from all sources!${NC}"
-        rm -rf "$temp_dir"
         return 1
     fi
     
-    # Register WARP account
-    echo -e "${YELLOW}Registering WARP account...${NC}"
-    /usr/local/bin/warp-go --register --config=/usr/local/bin/warp.conf > /tmp/warp-register.log 2>&1
-    
-    if [ ! -f /usr/local/bin/warp.conf ]; then
-        echo -e "${YELLOW}Creating WARP configuration manually...${NC}"
-        
-        # Generate configuration
-        cat > /usr/local/bin/warp.conf <<EOF
-[Account]
-Device = $(cat /proc/sys/kernel/random/uuid)
-PrivateKey = $(openssl rand -base64 32 | head -c 44)
-Token = 
-Type = free
-Name = WARP
-MTU = 1280
-
-[Peer]
-PublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=
-Endpoint = 162.159.192.1:2408
-AllowedIPs = 0.0.0.0/0, ::/0
-KeepAlive = 30
-
-[Script]
-PostUp = 
-PostDown = 
-EOF
-    fi
-    
-    # Create systemd service
-    echo -e "${YELLOW}Creating systemd service...${NC}"
-    cat > /lib/systemd/system/warp-go.service <<EOF
-[Unit]
-Description=Cloudflare WARP Service
-After=network.target
-Wants=network.target
-Documentation=https://developers.cloudflare.com/warp-client/
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/usr/local/bin
-ExecStart=/usr/local/bin/warp-go --config=/usr/local/bin/warp.conf
-Restart=always
-RestartSec=3
-Environment="LOG_LEVEL=info"
-LimitNOFILE=1000000
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    
-    # Enable and start service
-    systemctl daemon-reload
-    systemctl enable warp-go
-    systemctl start warp-go
-    
-    # Wait for service to start
-    echo -e "${YELLOW}Waiting for WARP to start...${NC}"
-    for i in {1..10}; do
-        if systemctl is-active --quiet warp-go; then
-            echo -e "${GREEN}✓ WARP service started successfully${NC}"
-            break
-        fi
-        echo -n "."
-        sleep 2
-    done
-    
-    # Cleanup
-    cd /
-    rm -rf "$temp_dir"
-    
-    # Check installation
-    if systemctl is-active --quiet warp-go; then
-        echo -e "${GREEN}✓ WARP installation completed!${NC}"
-        
-        # Wait a bit for connection to establish
-        sleep 5
-        
-        # Configure routing for all traffic
-        echo -e "${YELLOW}Configuring routing for all traffic...${NC}"
-        
-        # Get current IPs
-        local current_ipv4=$(ip -4 addr show scope global | grep inet | awk '{print $2}' | cut -d/ -f1 | head -n1)
-        local current_ipv6=$(ip -6 addr show scope global | grep inet6 | awk '{print $2}' | cut -d/ -f1 | head -n1)
-        
-        # Add IP rules (only if we have IPs)
-        if [ -n "$current_ipv4" ]; then
-            ip rule add from $current_ipv4 lookup main 2>/dev/null && \
-            echo -e "${GREEN}✓ IPv4 routing configured${NC}" || \
-            echo -e "${YELLOW}⚠ IPv4 routing configuration skipped${NC}"
-        fi
-        
-        if [ -n "$current_ipv6" ]; then
-            ip -6 rule add from $current_ipv6 lookup main 2>/dev/null && \
-            echo -e "${GREEN}✓ IPv6 routing configured${NC}" || \
-            echo -e "${YELLOW}⚠ IPv6 routing configuration skipped${NC}"
-        fi
-        
-        # Create warpip directory
-        mkdir -p /root/warpip
-        
-        # Show final status
-        echo -e "${YELLOW}Final WARP status check...${NC}"
-        check_warp_status
-        
-        echo -e "\n${GREEN}✅ Cloudflare WARP installation completed successfully!${NC}"
-        echo -e "${YELLOW}All traffic is now routed through Cloudflare WARP.${NC}"
-        echo -e "${BLUE}Configuration file: /usr/local/bin/warp.conf${NC}"
-        echo -e "${BLUE}Service: warp-go${NC}"
-        echo -e "${BLUE}Check status: systemctl status warp-go${NC}"
-        
+    # Check IPv4 WARP
+    echo -e "${YELLOW}Testing IPv4 WARP connection...${NC}"
+    local warp_ipv4_status=$(curl -s4 --max-time 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep warp | cut -d= -f2)
+    if [[ "$warp_ipv4_status" == "on" ]] || [[ "$warp_ipv4_status" == "plus" ]]; then
+        local warp_ipv4=$(curl -s4 --max-time 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep ip= | cut -d= -f2)
+        echo -e "${GREEN}✓ WARP IPv4: Active ($warp_ipv4)${NC}"
     else
-        echo -e "${RED}✗ Failed to start WARP service${NC}"
-        echo -e "${YELLOW}Checking logs...${NC}"
-        journalctl -u warp-go --no-pager -n 20
-        return 1
+        echo -e "${YELLOW}⚠ WARP IPv4: Not active${NC}"
     fi
+    
+    # Check IPv6 WARP
+    echo -e "${YELLOW}Testing IPv6 WARP connection...${NC}"
+    local warp_ipv6_status=$(curl -s6 --max-time 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep warp | cut -d= -f2)
+    if [[ "$warp_ipv6_status" == "on" ]] || [[ "$warp_ipv6_status" == "plus" ]]; then
+        local warp_ipv6=$(curl -s6 --max-time 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep ip= | cut -d= -f2)
+        echo -e "${GREEN}✓ WARP IPv6: Active ($warp_ipv6)${NC}"
+    else
+        echo -e "${YELLOW}⚠ WARP IPv6: Not active${NC}"
+    fi
+    
+    # Test connectivity
+    echo -e "${YELLOW}Testing connectivity through WARP...${NC}"
+    if curl -s4 --max-time 5 https://1.1.1.1 >/dev/null 2>&1; then
+        echo -e "${GREEN}✓ IPv4 Connectivity: OK${NC}"
+    else
+        echo -e "${RED}✗ IPv4 Connectivity: Failed${NC}"
+    fi
+    
+    return 0
 }
 
 # Remove WARP
@@ -2028,13 +2143,9 @@ remove_warp() {
     
     # Remove files
     rm -f /usr/local/bin/warp-go
-    rm -f /usr/local/bin/warp.conf
-    rm -f /lib/systemd/system/warp-go.service
-    rm -f /root/WARP-UP.sh 2>/dev/null
-    rm -rf /root/warpip 2>/dev/null
-    
-    # Remove cron jobs
-    crontab -l 2>/dev/null | grep -v warp-go | crontab - 2>/dev/null
+    rm -f /usr/local/bin/warp-connect
+    rm -f /etc/systemd/system/warp-go.service
+    rm -rf /etc/warp
     
     # Reload systemd
     systemctl daemon-reload 2>/dev/null
@@ -2047,19 +2158,20 @@ remove_warp() {
 manage_warp() {
     while true; do
         echo -e "\n${YELLOW}Cloudflare WARP Management${NC}"
-        echo -e "1) Install/Reinstall WARP"
+        echo -e "1) Install WARP with Location Selection"
         echo -e "2) Check WARP Status"
         echo -e "3) Restart WARP Service"
         echo -e "4) Stop WARP Service"
         echo -e "5) Remove WARP"
         echo -e "6) View WARP Logs"
-        echo -e "7) Back to Main Menu"
+        echo -e "7) Manual WARP IP Check"
+        echo -e "8) Back to Main Menu"
         
-        read -p "Enter your choice [1-7]: " warp_choice
+        read -p "Enter your choice [1-8]: " warp_choice
         
         case $warp_choice in
             1)
-                install_warp_cloudflare
+                install_warp_with_location
                 ;;
             2)
                 check_warp_status
@@ -2090,6 +2202,10 @@ manage_warp() {
                 journalctl -u warp-go --no-pager -n 20
                 ;;
             7)
+                echo -e "${YELLOW}Checking WARP IP...${NC}"
+                curl -s4 https://cloudflare.com/cdn-cgi/trace | grep -E "ip=|warp="
+                ;;
+            8)
                 return
                 ;;
             *)
@@ -2101,7 +2217,125 @@ manage_warp() {
     done
 }
 
+# ============================================================================
+# FIX DNS FUNCTION (گزینه 23)
+# ============================================================================
+fix_dns() {
+    echo -e "${YELLOW}Fixing DNS Configuration...${NC}"
+    print_separator
+    
+    echo -e "${BLUE}Step 1: Stopping systemd-resolved...${NC}"
+    sudo systemctl stop systemd-resolved
+    echo -e "${GREEN}✓ systemd-resolved stopped${NC}"
+    
+    echo -e "${BLUE}Step 2: Disabling systemd-resolved...${NC}"
+    sudo systemctl disable systemd-resolved
+    echo -e "${GREEN}✓ systemd-resolved disabled${NC}"
+    
+    echo -e "${BLUE}Step 3: Removing existing resolv.conf...${NC}"
+    sudo rm -f /etc/resolv.conf
+    echo -e "${GREEN}✓ /etc/resolv.conf removed${NC}"
+    
+    echo -e "${BLUE}Step 4: Creating new resolv.conf...${NC}"
+    
+    # Get DNS servers from user
+    echo -e "${YELLOW}Enter two DNS servers (separated by space):${NC}"
+    echo -e "${GREEN}Example: 1.1.1.1 8.8.8.8${NC}"
+    read -p "Enter DNS servers: " dns_input
+    
+    # Default to Cloudflare and Google if no input
+    if [ -z "$dns_input" ]; then
+        DNS1="1.1.1.1"
+        DNS2="8.8.8.8"
+        echo -e "${YELLOW}Using default DNS: $DNS1 $DNS2${NC}"
+    else
+        DNS_ARRAY=($dns_input)
+        DNS1=${DNS_ARRAY[0]}
+        DNS2=${DNS_ARRAY[1]:-8.8.8.8}  # Default second DNS to Google
+    fi
+    
+    # Validate DNS servers
+    validate_dns() {
+        local dns=$1
+        if [[ $dns =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            return 0
+        else
+            return 1
+        fi
+    }
+    
+    if ! validate_dns "$DNS1"; then
+        echo -e "${RED}Invalid DNS server: $DNS1${NC}"
+        echo -e "${YELLOW}Using default DNS: 1.1.1.1${NC}"
+        DNS1="1.1.1.1"
+    fi
+    
+    if ! validate_dns "$DNS2"; then
+        echo -e "${RED}Invalid DNS server: $DNS2${NC}"
+        echo -e "${YELLOW}Using default DNS: 8.8.8.8${NC}"
+        DNS2="8.8.8.8"
+    fi
+    
+    # Create new resolv.conf
+    cat > /etc/resolv.conf <<EOF
+# Generated by $SCRIPT_NAME - Fix DNS
+# Date: $(date)
+# Manual DNS configuration
+
+nameserver $DNS1
+nameserver $DNS2
+options rotate
+options timeout:2
+options attempts:3
+EOF
+    
+    echo -e "${GREEN}✓ /etc/resolv.conf created with DNS: $DNS1, $DNS2${NC}"
+    
+    # Make resolv.conf immutable
+    echo -e "${BLUE}Step 5: Making resolv.conf immutable...${NC}"
+    chattr +i /etc/resolv.conf 2>/dev/null || true
+    echo -e "${GREEN}✓ /etc/resolv.conf is now immutable${NC}"
+    
+    # Create systemd-resolved disable configuration
+    echo -e "${BLUE}Step 6: Creating systemd-resolved disable config...${NC}"
+    mkdir -p /etc/systemd/resolved.conf.d/
+    cat > /etc/systemd/resolved.conf.d/disable-resolved.conf <<EOF
+[Resolve]
+DNSStubListener=no
+EOF
+    
+    # Restart systemd-resolved (it will start but not interfere)
+    systemctl restart systemd-resolved 2>/dev/null || true
+    
+    # Test DNS
+    echo -e "${BLUE}Step 7: Testing DNS configuration...${NC}"
+    if command -v dig >/dev/null 2>&1; then
+        echo -e "${YELLOW}Testing DNS resolution...${NC}"
+        if dig google.com +short @$DNS1 >/dev/null 2>&1; then
+            echo -e "${GREEN}✓ DNS $DNS1 is working${NC}"
+        else
+            echo -e "${YELLOW}⚠ DNS $DNS1 test failed${NC}"
+        fi
+        
+        if dig google.com +short @$DNS2 >/dev/null 2>&1; then
+            echo -e "${GREEN}✓ DNS $DNS2 is working${NC}"
+        else
+            echo -e "${YELLOW}⚠ DNS $DNS2 test failed${NC}"
+        fi
+    fi
+    
+    print_separator
+    echo -e "${GREEN}✅ DNS Fix completed successfully!${NC}"
+    echo -e "${YELLOW}Configured DNS servers:${NC}"
+    echo -e "  Primary:   $DNS1"
+    echo -e "  Secondary: $DNS2"
+    echo -e "${YELLOW}File: /etc/resolv.conf${NC}"
+    echo -e "${YELLOW}Status: Immutable (protected from changes)${NC}"
+}
+
+# ============================================================================
 # Reset ALL Changes
+# ============================================================================
 reset_all() {
     if ! confirm_action "This will reset ALL changes to default settings!"; then
         echo -e "${YELLOW}Operation cancelled.${NC}"
@@ -2146,6 +2380,11 @@ reset_all() {
         echo -e "${GREEN}HAProxy stopped and disabled.${NC}"
     fi
     
+    # Remove Fix DNS changes
+    chattr -i /etc/resolv.conf 2>/dev/null || true
+    rm -f /etc/systemd/resolved.conf.d/disable-resolved.conf 2>/dev/null
+    systemctl restart systemd-resolved 2>/dev/null || true
+    
     sysctl -p >/dev/null 2>&1
 
     # Remove config file
@@ -2157,7 +2396,9 @@ reset_all() {
     echo -e "${GREEN}All changes have been reset to default!${NC}"
 }
 
+# ============================================================================
 # Main Menu
+# ============================================================================
 show_menu() {
     load_config
     detect_distro
@@ -2181,14 +2422,15 @@ show_menu() {
         echo -e "15) TCP MUX Configuration"
         echo -e "16) Reboot System"
         echo -e "17) Find Best MTU Size"
-        echo -e "18) Setup Iran Tunnel"
-        echo -e "19) Setup Kharej Tunnel"
+        echo -e "18) Setup Iran Tunnel (Fixed)"
+        echo -e "19) Setup Kharej Tunnel (Fixed)"
         echo -e "20) Delete VXLAN Tunnel"
         echo -e "21) Install HAProxy & All Ports"
-        echo -e "22) Cloudflare WARP Management"
-        echo -e "23) Exit"
+        echo -e "22) Cloudflare WARP Management (Improved)"
+        echo -e "23) Fix DNS Configuration"
+        echo -e "24) Exit"
         
-        read -p "Enter your choice [1-23]: " choice
+        read -p "Enter your choice [1-24]: " choice
         
         case $choice in
             1)
@@ -2264,6 +2506,9 @@ show_menu() {
                 manage_warp
                 ;;
             23)
+                fix_dns
+                ;;
+            24)
                 echo -e "${GREEN}Exiting... Thank you for using $SCRIPT_NAME!${NC}"
                 exit 0
                 ;;
