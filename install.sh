@@ -2,7 +2,7 @@
 
 # =========================================================
 # Ultimate Network Optimizer
-# Version 9.7 - Fully English Menu & Enhanced Features
+# Version 9.7 - Fully English Menu & IPv6 DNS Support
 # Author: Parham Pahlevan
 # =========================================================
 
@@ -157,9 +157,21 @@ check_root() {
     fi
 }
 
+# Improved validation: accepts IPv4 and IPv6
 validate_ip() {
     local ip=$1
-    [[ $ip =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+    # IPv4
+    if [[ $ip =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        return 0
+    fi
+    # IPv6 (basic support)
+    if [[ $ip =~ ^([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}$ ]] || \
+       [[ $ip =~ ^::([0-9a-fA-F]{0,4}:){0,6}[0-9a-fA-F]{0,4}$ ]] || \
+       [[ $ip =~ ^([0-9a-fA-F]{0,4}:){1,6}:[0-9a-fA-F]{0,4}$ ]] || \
+       [[ $ip == "::" ]] || [[ $ip == "::1" ]]; then
+        return 0
+    fi
+    return 1
 }
 
 _test_connectivity() {
@@ -278,20 +290,20 @@ configure_mtu() {
     echo -e "${GREEN}MTU set to $new_mtu${NC}"
 }
 
-# DNS Configuration
+# ================== DNS Configuration (supports IPv4 & IPv6) ==================
 configure_dns() {
-    echo -e "\n${YELLOW}DNS Configuration (simple & persistent)${NC}"
+    echo -e "\n${YELLOW}DNS Configuration (supports IPv4 and IPv6)${NC}"
     print_separator
 
     echo -e "${YELLOW}Resetting current DNS configuration...${NC}"
     chattr -i /etc/resolv.conf 2>/dev/null || true
     rm -f /etc/resolv.conf
 
-    echo -e "${BLUE}Enter the DNS servers you want to use:${NC}"
-    read -p "Primary DNS (e.g. 1.1.1.1): " dns1
+    echo -e "${BLUE}Enter the DNS servers you want to use (IPv4 or IPv6):${NC}"
+    read -p "Primary DNS: " dns1
 
     if ! validate_ip "$dns1"; then
-        echo -e "${RED}Invalid primary DNS IP!${NC}"
+        echo -e "${RED}Invalid IP address!${NC}"
         return 1
     fi
 
@@ -331,6 +343,7 @@ EOF
     echo -e "${GREEN}Current DNS servers: ${DNS_SERVERS[*]}${NC}"
     echo -e "${GREEN}Configuration will persist across reboots.${NC}"
 }
+# ======================================================================
 
 reset_dns() {
     echo -e "${YELLOW}Resetting DNS to default...${NC}"
@@ -381,7 +394,7 @@ show_dns() {
     done
 }
 
-# BBR
+# ========== BBR ==========
 install_bbr() {
     echo -e "${YELLOW}Installing BBR...${NC}"
     print_separator
@@ -470,6 +483,7 @@ uninstall_bbr() {
     echo -e "${GREEN}Current congestion control: ${cc}${NC}"
     echo -e "${GREEN}BBR uninstall / rollback completed.${NC}"
 }
+# ===============================================================
 
 create_backup() {
     local ts backup_file
@@ -575,7 +589,9 @@ manage_tunnel() {
     read -p "Enter to continue..."
 }
 
+# ==============================================================
 # TCP MUX Configuration (Enhanced)
+# ==============================================================
 configure_tcp_mux() {
     echo -e "${YELLOW}Configuring TCP MUX with advanced stability & performance settings...${NC}"
     
@@ -625,6 +641,7 @@ EOT
     echo -e "${GREEN}TCP MUX configured with performance optimizations.${NC}"
     echo -e "${YELLOW}Note: Some settings may require reboot to take full effect.${NC}"
 }
+# ==============================================================
 
 system_reboot() {
     if ! confirm_action "Reboot system now?"; then echo -e "${YELLOW}Cancelled.${NC}"; return; fi
@@ -655,7 +672,7 @@ find_best_mtu() {
     [[ "$a" =~ ^[Yy]$ ]] && configure_mtu "$best_mtu"
 }
 
-# VXLAN PERSISTENT
+# ========== VXLAN PERSISTENT ==========
 create_vxlan_persistent_service() {
     local role="$1" remote_ip="$2" iface="$3"
     local vx_if="vxlan100" ipv4 ipv6
@@ -761,7 +778,7 @@ delete_vxlan_tunnel() {
     echo -e "${GREEN}VXLAN100 removed.${NC}"
 }
 
-# HAProxy
+# ========== HAProxy ==========
 install_haproxy_all_ports() {
     echo -e "${YELLOW}Installing HAProxy...${NC}"
     if ! command -v haproxy >/dev/null 2>&1; then
@@ -849,7 +866,7 @@ EOF
     echo -e "${GREEN}HAProxy installed & started.${NC}"
 }
 
-# New features
+# ========== New features ==========
 
 # 1. GitHub Fixer
 github_fixer() {
@@ -946,7 +963,9 @@ system_lock_fixer() {
     echo -e "${GREEN}Locks cleared and dpkg reconfigured.${NC}"
 }
 
+# ==============================================================
 # CPU Optimizer (separate script integrated)
+# ==============================================================
 cpu_optimizer() {
     # Internal functions for CPU Optimizer
     get_interface() {
@@ -1303,6 +1322,7 @@ EOF
         esac
     done
 }
+# ==============================================================
 
 reset_all() {
     if ! confirm_action "Reset ALL changes to default?"; then return; fi
@@ -1330,7 +1350,7 @@ show_menu() {
         echo -e "${BOLD}Main Menu:${NC}"
         echo " 1) Install BBR Optimization"
         echo " 2) Configure MTU"
-        echo " 3) Configure DNS"
+        echo " 3) Configure DNS (IPv4 & IPv6)"
         echo " 4) Firewall Management"
         echo " 5) CPU Optimizer (Full server optimization)"
         echo " 6) Manage IPv6"
