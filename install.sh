@@ -2,12 +2,12 @@
 
 # =========================================================
 # Ultimate Network Optimizer
-# Version 9.6 - VXLAN persistent + Cloudflare WARP (warp-cli)
+# Version 9.7 - با افزونه‌های جدید
 # Author: Parham Pahlevan
 # =========================================================
 
 SCRIPT_NAME="Ultimate Network Optimizer"
-SCRIPT_VERSION="9.6"
+SCRIPT_VERSION="9.7"
 AUTHOR="Parham Pahlevan"
 CONFIG_FILE="/etc/network_optimizer.conf"
 LOG_FILE="/var/log/network_optimizer.log"
@@ -590,11 +590,16 @@ manage_tunnel() {
     read -p "Enter to continue..."
 }
 
+# ==============================================================
+# گزینه ۱۵: تنظیمات TCP MUX (بهبود یافته)
+# ==============================================================
 configure_tcp_mux() {
-    echo -e "${YELLOW}Configuring TCP MUX...${NC}"
+    echo -e "${YELLOW}Configuring TCP MUX with advanced stability & performance settings...${NC}"
+    
+    # فایل کانفیگ TCP MUX (مشابه قبل)
     local mux_config="/etc/tcp_mux.conf"
     cat > "$mux_config" <<EOT
-# TCP MUX Config
+# TCP MUX Config - Advanced
 remote_addr = "0.0.0.0:3080"
 transport = "tcpmux"
 token = "your_token"
@@ -611,16 +616,36 @@ heartbeat = 40
 channel_size = 2048
 mux_con = 8
 EOT
-    sysctl -w net.ipv4.tcp_rmem='4096 87380 16777216'
-    sysctl -w net.ipv4.tcp_wmem='4096 65536 16777216'
-    sysctl -w net.core.rmem_max=33554432
-    sysctl -w net.core.wmem_max=33554432
-    sysctl -w net.ipv4.tcp_tw_reuse=1
-    sysctl -w net.ipv4.tcp_fin_timeout=30
-    sysctl -w net.ipv4.tcp_max_syn_backlog=16384
-    sysctl -w net.core.somaxconn=32768
-    echo -e "${GREEN}TCP MUX configured (${mux_config}).${NC}"
+
+    # اعمال تنظیمات sysctl برای پایداری و کاهش تأخیر
+    echo -e "${BLUE}Applying advanced sysctl settings for low latency and high throughput...${NC}"
+    
+    sysctl -w net.ipv4.tcp_rmem="4096 87380 16777216" >/dev/null
+    sysctl -w net.ipv4.tcp_wmem="4096 65536 16777216" >/dev/null
+    sysctl -w net.core.rmem_max=33554432 >/dev/null
+    sysctl -w net.core.wmem_max=33554432 >/dev/null
+    sysctl -w net.ipv4.tcp_tw_reuse=1 >/dev/null
+    sysctl -w net.ipv4.tcp_fin_timeout=30 >/dev/null
+    sysctl -w net.ipv4.tcp_max_syn_backlog=16384 >/dev/null
+    sysctl -w net.core.somaxconn=32768 >/dev/null
+    sysctl -w net.core.netdev_max_backlog=10000 >/dev/null
+    sysctl -w net.ipv4.tcp_slow_start_after_idle=0 >/dev/null
+    sysctl -w net.ipv4.tcp_notsent_lowat=16384 >/dev/null
+    sysctl -w net.ipv4.tcp_mtu_probing=1 >/dev/null
+    sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1 || true
+    sysctl -w net.core.default_qdisc=fq_codel >/dev/null
+    sysctl -w net.ipv4.tcp_keepalive_time=300 >/dev/null
+    sysctl -w net.ipv4.tcp_keepalive_intvl=60 >/dev/null
+    sysctl -w net.ipv4.tcp_keepalive_probes=10 >/dev/null
+    
+    # افزایش بافرهای UDP (برای کاهش جیتر)
+    sysctl -w net.core.rmem_default=262144 >/dev/null
+    sysctl -w net.core.wmem_default=262144 >/dev/null
+    
+    echo -e "${GREEN}TCP MUX configured with performance optimizations.${NC}"
+    echo -e "${YELLOW}Note: Some settings may require reboot to take full effect.${NC}"
 }
+# ==============================================================
 
 system_reboot() {
     if ! confirm_action "Reboot system now?"; then echo -e "${YELLOW}Cancelled.${NC}"; return; fi
@@ -845,6 +870,106 @@ EOF
     echo -e "${GREEN}HAProxy installed & started.${NC}"
 }
 
+# ========== افزونه‌های جدید ==========
+
+# ۱. GitHub Fixer
+github_fixer() {
+    echo -e "${YELLOW}Adding GitHub raw CDN to /etc/hosts...${NC}"
+    local entry="185.199.108.133 raw.githubusercontent.com"
+    if grep -q "raw.githubusercontent.com" /etc/hosts; then
+        echo -e "${YELLOW}Entry already exists. Updating...${NC}"
+        sed -i '/raw.githubusercontent.com/d' /etc/hosts
+    fi
+    echo "$entry" >> /etc/hosts
+    echo -e "${GREEN}GitHub fix applied.${NC}"
+}
+
+# ۲. Uninstall HAProxy کامل
+uninstall_haproxy_full() {
+    if ! confirm_action "Uninstall HAProxy completely?"; then return; fi
+    echo -e "${YELLOW}Stopping and removing HAProxy...${NC}"
+    systemctl stop haproxy 2>/dev/null
+    systemctl disable haproxy 2>/dev/null
+    apt purge -y haproxy 2>/dev/null
+    apt autoremove -y 2>/dev/null
+    echo -e "${GREEN}HAProxy completely removed.${NC}"
+}
+
+# ۳. تنظیم timezone به ایران
+timezone_fixer() {
+    echo -e "${YELLOW}Setting timezone to Asia/Tehran...${NC}"
+    timedatectl set-timezone Asia/Tehran 2>/dev/null || {
+        echo -e "${RED}timedatectl not available, trying manual...${NC}"
+        ln -sf /usr/share/zoneinfo/Asia/Tehran /etc/localtime
+    }
+    echo -e "${GREEN}Timezone set to $(timedatectl | grep "Time zone" | awk '{print $3}')${NC}"
+}
+
+# ۴. BBR + fq_codel با تنظیمات پیشرفته
+bbr_fq_codel() {
+    echo -e "${YELLOW}Applying BBR + fq_codel with advanced sysctl and limits...${NC}"
+    
+    modprobe nf_conntrack 2>/dev/null
+    echo 1012144 | tee /sys/module/nf_conntrack/parameters/hashsize >/dev/null
+    
+    sysctl -w net.ipv4.tcp_rmem="4096 87380 134217728" >/dev/null
+    sysctl -w net.ipv4.tcp_wmem="4096 65536 134217728" >/dev/null
+    sysctl -w net.core.default_qdisc=fq_codel >/dev/null
+    sysctl -w net.netfilter.nf_conntrack_max=4048576 >/dev/null
+    echo 65535 | tee /proc/sys/net/netfilter/nf_conntrack_expect_max >/dev/null
+    sysctl -w net.ipv4.ip_local_port_range="10240 65535" >/dev/null
+    sysctl -w net.core.somaxconn=65535 >/dev/null
+    sysctl -w net.core.rmem_max=268435456 >/dev/null
+    sysctl -w net.core.wmem_max=268435456 >/dev/null
+    sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null
+    sysctl -w net.ipv4.tcp_max_syn_backlog=65535 >/dev/null
+    sysctl -w net.ipv4.tcp_mem="2097152 3145728 4194304" >/dev/null
+    sysctl -w net.ipv4.tcp_slow_start_after_idle=0 >/dev/null
+    
+    # اعمال limits.conf
+    echo -e "* soft nofile 2048576\n* hard nofile 2048576\nroot soft nofile 2048576\nroot hard nofile 2048576" | tee -a /etc/security/limits.conf >/dev/null
+    sysctl -w fs.file-max=2048576 >/dev/null
+    
+    echo -e "${GREEN}BBR+fq_codel applied.${NC}"
+}
+
+# ۵. Nameserver Fixer (ریست DNS)
+nameserver_fixer() {
+    echo -e "${YELLOW}Resetting DNS to 1.1.1.1 and 8.8.8.8...${NC}"
+    chattr -i /etc/resolv.conf 2>/dev/null || true
+    rm -f /etc/resolv.conf
+    echo -e "nameserver 1.1.1.1\nnameserver 8.8.8.8" > /etc/resolv.conf
+    echo -e "${GREEN}DNS reset.${NC}"
+}
+
+# ۶. IPv6 Disable کامل
+ipv6_disable_full() {
+    echo -e "${YELLOW}Disabling IPv6 completely...${NC}"
+    sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null
+    sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null
+    sysctl -w net.ipv6.conf.lo.disable_ipv6=1 >/dev/null
+    
+    cat > /etc/sysctl.d/99-disable-ipv6.conf <<EOF
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+net.ipv6.conf.lo.disable_ipv6 = 1
+EOF
+    
+    sysctl --system >/dev/null 2>&1
+    echo -e "${GREEN}IPv6 disabled.${NC}"
+}
+
+# ۷. System Lock Fixer
+system_lock_fixer() {
+    echo -e "${YELLOW}Fixing dpkg locks...${NC}"
+    rm -f /var/lib/dpkg/lock*
+    rm -f /var/cache/apt/archives/lock
+    dpkg --configure -a
+    echo -e "${GREEN}Locks cleared and dpkg reconfigured.${NC}"
+}
+
+# ===============================================================
+
 reset_all() {
     if ! confirm_action "Reset ALL changes to default?"; then return; fi
     ip link set dev "$NETWORK_INTERFACE" mtu 1500 2>/dev/null
@@ -869,21 +994,21 @@ show_menu() {
     while true; do
         show_header
         echo -e "${BOLD}Main Menu:${NC}"
-        echo "1) Install BBR Optimization"
-        echo "2) Configure MTU"
-        echo "3) Configure DNS"
-        echo "4) Firewall Management"
-        echo "5) Manage ICMP Ping"
-        echo "6) Manage IPv6"
-        echo "7) Setup IPTable Tunnel"
-        echo "8) Ping MTU Size Test"
-        echo "9) Reset ALL Changes"
+        echo " 1) Install BBR Optimization"
+        echo " 2) Configure MTU"
+        echo " 3) Configure DNS"
+        echo " 4) Firewall Management"
+        echo " 5) Manage ICMP Ping"
+        echo " 6) Manage IPv6"
+        echo " 7) Setup IPTable Tunnel"
+        echo " 8) Ping MTU Size Test"
+        echo " 9) Reset ALL Changes"
         echo "10) Show Current DNS"
         echo "11) Network Speed Test"
         echo "12) Backup Configuration"
         echo "13) Restore Backup"
         echo "14) Check for Updates"
-        echo "15) TCP MUX Configuration"
+        echo "15) TCP MUX Configuration (بهبود یافته)"
         echo "16) Reboot System"
         echo "17) Find Best MTU Size"
         echo "18) Setup Iran VXLAN Tunnel"
@@ -892,7 +1017,14 @@ show_menu() {
         echo "21) Install HAProxy & All Ports"
         echo "22) Exit"
         echo "23) Uninstall BBR and restore previous settings"
-        read -p "Enter your choice [1-23]: " choice
+        echo "24) GitHub Fixer (add raw.githubusercontent.com)"
+        echo "25) Uninstall HAProxy (complete removal)"
+        echo "26) WhatsApp Timezone Fixer (set to Asia/Tehran)"
+        echo "27) BBR + fq_codel (advanced settings)"
+        echo "28) Nameserver Fixer (1.1.1.1 & 8.8.8.8)"
+        echo "29) IPv6 Disable (full)"
+        echo "30) System Lock Fixer (dpkg)"
+        read -p "Enter your choice [1-30]: " choice
         case $choice in
             1)  install_bbr ;;
             2)  echo -e "Current MTU: $CURRENT_MTU"; read -p "New MTU: " m; [[ "$m" =~ ^[0-9]+$ ]] && configure_mtu "$m" || echo "invalid" ;;
@@ -917,6 +1049,13 @@ show_menu() {
             21) install_haproxy_all_ports ;;
             22) echo -e "${GREEN}Bye!${NC}"; exit 0 ;;
             23) uninstall_bbr ;;
+            24) github_fixer ;;
+            25) uninstall_haproxy_full ;;
+            26) timezone_fixer ;;
+            27) bbr_fq_codel ;;
+            28) nameserver_fixer ;;
+            29) ipv6_disable_full ;;
+            30) system_lock_fixer ;;
             *)  echo -e "${RED}Invalid option!${NC}" ;;
         esac
         read -p "Press [Enter] to continue..."
