@@ -2,7 +2,7 @@
 
 # =========================================================
 # Ultimate Network Optimizer
-# Version 9.7 - با افزونه‌های جدید
+# Version 9.7 - Fully English Menu & Enhanced Features
 # Author: Parham Pahlevan
 # =========================================================
 
@@ -278,7 +278,7 @@ configure_mtu() {
     echo -e "${GREEN}MTU set to $new_mtu${NC}"
 }
 
-# ================== NEW DNS LOGIC (per your request) ==================
+# DNS Configuration
 configure_dns() {
     echo -e "\n${YELLOW}DNS Configuration (simple & persistent)${NC}"
     print_separator
@@ -327,11 +327,10 @@ EOF
     CURRENT_DNS=$(printf "%s " "${DNS_SERVERS[@]}")
     save_config
 
-    echo -e "\n${GREEN}✓ DNS updated successfully.${NC}"
-    echo -e "${GREEN}✓ Current DNS servers: ${DNS_SERVERS[*]}${NC}"
-    echo -e "${GREEN}✓ Configuration will persist across reboots.${NC}"
+    echo -e "\n${GREEN}DNS updated successfully.${NC}"
+    echo -e "${GREEN}Current DNS servers: ${DNS_SERVERS[*]}${NC}"
+    echo -e "${GREEN}Configuration will persist across reboots.${NC}"
 }
-# ======================================================================
 
 reset_dns() {
     echo -e "${YELLOW}Resetting DNS to default...${NC}"
@@ -382,6 +381,7 @@ show_dns() {
     done
 }
 
+# BBR
 install_bbr() {
     echo -e "${YELLOW}Installing BBR...${NC}"
     print_separator
@@ -443,7 +443,6 @@ EOT
     [[ "$cc" == "bbr" ]] && echo -e "${GREEN}BBR enabled.${NC}" || echo -e "${YELLOW}BBR not active, but tuning applied.${NC}"
 }
 
-# ============= NEW: Uninstall / rollback BBR ==================
 uninstall_bbr() {
     echo -e "${YELLOW}Uninstalling BBR and restoring previous settings...${NC}"
     print_separator
@@ -471,7 +470,6 @@ uninstall_bbr() {
     echo -e "${GREEN}Current congestion control: ${cc}${NC}"
     echo -e "${GREEN}BBR uninstall / rollback completed.${NC}"
 }
-# ===============================================================
 
 create_backup() {
     local ts backup_file
@@ -549,19 +547,6 @@ manage_firewall() {
     read -p "Enter to continue..."
 }
 
-manage_icmp() {
-    echo -e "\n${YELLOW}ICMP Ping Management${NC}"
-    echo -e "1) Block Ping"
-    echo -e "2) Allow Ping"
-    echo -e "3) Back"
-    read -p "Choice [1-3]: " c
-    case $c in
-        1) iptables -A INPUT -p icmp --icmp-type echo-request -j DROP 2>/dev/null ;;
-        2) iptables -D INPUT -p icmp --icmp-type echo-request -j DROP 2>/dev/null ;;
-    esac
-    read -p "Enter to continue..."
-}
-
 manage_ipv6() {
     echo -e "\n${YELLOW}IPv6 Management${NC}"
     echo -e "1) Disable IPv6"
@@ -590,13 +575,10 @@ manage_tunnel() {
     read -p "Enter to continue..."
 }
 
-# ==============================================================
-# گزینه ۱۵: تنظیمات TCP MUX (بهبود یافته)
-# ==============================================================
+# TCP MUX Configuration (Enhanced)
 configure_tcp_mux() {
     echo -e "${YELLOW}Configuring TCP MUX with advanced stability & performance settings...${NC}"
     
-    # فایل کانفیگ TCP MUX (مشابه قبل)
     local mux_config="/etc/tcp_mux.conf"
     cat > "$mux_config" <<EOT
 # TCP MUX Config - Advanced
@@ -617,7 +599,6 @@ channel_size = 2048
 mux_con = 8
 EOT
 
-    # اعمال تنظیمات sysctl برای پایداری و کاهش تأخیر
     echo -e "${BLUE}Applying advanced sysctl settings for low latency and high throughput...${NC}"
     
     sysctl -w net.ipv4.tcp_rmem="4096 87380 16777216" >/dev/null
@@ -638,14 +619,12 @@ EOT
     sysctl -w net.ipv4.tcp_keepalive_intvl=60 >/dev/null
     sysctl -w net.ipv4.tcp_keepalive_probes=10 >/dev/null
     
-    # افزایش بافرهای UDP (برای کاهش جیتر)
     sysctl -w net.core.rmem_default=262144 >/dev/null
     sysctl -w net.core.wmem_default=262144 >/dev/null
     
     echo -e "${GREEN}TCP MUX configured with performance optimizations.${NC}"
     echo -e "${YELLOW}Note: Some settings may require reboot to take full effect.${NC}"
 }
-# ==============================================================
 
 system_reboot() {
     if ! confirm_action "Reboot system now?"; then echo -e "${YELLOW}Cancelled.${NC}"; return; fi
@@ -676,7 +655,7 @@ find_best_mtu() {
     [[ "$a" =~ ^[Yy]$ ]] && configure_mtu "$best_mtu"
 }
 
-# ========== VXLAN PERSISTENT ==========
+# VXLAN PERSISTENT
 create_vxlan_persistent_service() {
     local role="$1" remote_ip="$2" iface="$3"
     local vx_if="vxlan100" ipv4 ipv6
@@ -782,7 +761,7 @@ delete_vxlan_tunnel() {
     echo -e "${GREEN}VXLAN100 removed.${NC}"
 }
 
-# ========== HAProxy ==========
+# HAProxy
 install_haproxy_all_ports() {
     echo -e "${YELLOW}Installing HAProxy...${NC}"
     if ! command -v haproxy >/dev/null 2>&1; then
@@ -870,9 +849,9 @@ EOF
     echo -e "${GREEN}HAProxy installed & started.${NC}"
 }
 
-# ========== افزونه‌های جدید ==========
+# New features
 
-# ۱. GitHub Fixer
+# 1. GitHub Fixer
 github_fixer() {
     echo -e "${YELLOW}Adding GitHub raw CDN to /etc/hosts...${NC}"
     local entry="185.199.108.133 raw.githubusercontent.com"
@@ -884,7 +863,7 @@ github_fixer() {
     echo -e "${GREEN}GitHub fix applied.${NC}"
 }
 
-# ۲. Uninstall HAProxy کامل
+# 2. Uninstall HAProxy complete
 uninstall_haproxy_full() {
     if ! confirm_action "Uninstall HAProxy completely?"; then return; fi
     echo -e "${YELLOW}Stopping and removing HAProxy...${NC}"
@@ -895,7 +874,7 @@ uninstall_haproxy_full() {
     echo -e "${GREEN}HAProxy completely removed.${NC}"
 }
 
-# ۳. تنظیم timezone به ایران
+# 3. Timezone fix to Asia/Tehran
 timezone_fixer() {
     echo -e "${YELLOW}Setting timezone to Asia/Tehran...${NC}"
     timedatectl set-timezone Asia/Tehran 2>/dev/null || {
@@ -905,7 +884,7 @@ timezone_fixer() {
     echo -e "${GREEN}Timezone set to $(timedatectl | grep "Time zone" | awk '{print $3}')${NC}"
 }
 
-# ۴. BBR + fq_codel با تنظیمات پیشرفته
+# 4. BBR + fq_codel with advanced settings
 bbr_fq_codel() {
     echo -e "${YELLOW}Applying BBR + fq_codel with advanced sysctl and limits...${NC}"
     
@@ -926,14 +905,13 @@ bbr_fq_codel() {
     sysctl -w net.ipv4.tcp_mem="2097152 3145728 4194304" >/dev/null
     sysctl -w net.ipv4.tcp_slow_start_after_idle=0 >/dev/null
     
-    # اعمال limits.conf
     echo -e "* soft nofile 2048576\n* hard nofile 2048576\nroot soft nofile 2048576\nroot hard nofile 2048576" | tee -a /etc/security/limits.conf >/dev/null
     sysctl -w fs.file-max=2048576 >/dev/null
     
     echo -e "${GREEN}BBR+fq_codel applied.${NC}"
 }
 
-# ۵. Nameserver Fixer (ریست DNS)
+# 5. Nameserver Fixer (reset DNS)
 nameserver_fixer() {
     echo -e "${YELLOW}Resetting DNS to 1.1.1.1 and 8.8.8.8...${NC}"
     chattr -i /etc/resolv.conf 2>/dev/null || true
@@ -942,7 +920,7 @@ nameserver_fixer() {
     echo -e "${GREEN}DNS reset.${NC}"
 }
 
-# ۶. IPv6 Disable کامل
+# 6. IPv6 Disable full
 ipv6_disable_full() {
     echo -e "${YELLOW}Disabling IPv6 completely...${NC}"
     sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null
@@ -959,7 +937,7 @@ EOF
     echo -e "${GREEN}IPv6 disabled.${NC}"
 }
 
-# ۷. System Lock Fixer
+# 7. System Lock Fixer
 system_lock_fixer() {
     echo -e "${YELLOW}Fixing dpkg locks...${NC}"
     rm -f /var/lib/dpkg/lock*
@@ -968,7 +946,363 @@ system_lock_fixer() {
     echo -e "${GREEN}Locks cleared and dpkg reconfigured.${NC}"
 }
 
-# ===============================================================
+# CPU Optimizer (separate script integrated)
+cpu_optimizer() {
+    # Internal functions for CPU Optimizer
+    get_interface() {
+        echo $(ip -4 route show default | awk '{print $5}' | head -1)
+    }
+
+    backup_files() {
+        if [[ ! -f /etc/sysctl.conf.backup ]]; then
+            cp /etc/sysctl.conf /etc/sysctl.conf.backup
+            echo -e "${GREEN}Backup created: /etc/sysctl.conf.backup${NC}"
+        fi
+        if [[ ! -f /etc/resolv.conf.backup ]]; then
+            cp /etc/resolv.conf /etc/resolv.conf.backup
+            echo -e "${GREEN}Backup created: /etc/resolv.conf.backup${NC}"
+        fi
+    }
+
+    restore_backups() {
+        if [[ -f /etc/sysctl.conf.backup ]]; then
+            cp /etc/sysctl.conf.backup /etc/sysctl.conf
+            echo -e "${GREEN}Restored sysctl.conf from backup${NC}"
+        fi
+        if [[ -f /etc/resolv.conf.backup ]]; then
+            cp /etc/resolv.conf.backup /etc/resolv.conf
+            echo -e "${GREEN}Restored resolv.conf from backup${NC}"
+        fi
+    }
+
+    install_prerequisites() {
+        echo -e "${YELLOW}Installing prerequisites...${NC}"
+        apt-get update
+        apt-get install -y ethtool irqbalance nano curl wget
+        echo -e "${GREEN}Prerequisites installed${NC}"
+    }
+
+    step1() {
+        echo -e "${YELLOW}Step 1: Disabling TSO/GSO/GRO...${NC}"
+        local IF=$(get_interface)
+        if [[ -n "$IF" ]]; then
+            ethtool -K $IF tso off gso off gro off
+            echo -e "${GREEN}TSO/GSO/GRO disabled on $IF${NC}"
+            if ! grep -q "ethtool -K $IF" /etc/rc.local; then
+                sed -i '/exit 0/d' /etc/rc.local 2>/dev/null
+                echo "ethtool -K $IF tso off gso off gro off" >> /etc/rc.local
+                echo "exit 0" >> /etc/rc.local
+                chmod +x /etc/rc.local
+            fi
+        else
+            echo -e "${RED}Failed to detect network interface${NC}"
+        fi
+    }
+
+    step2() {
+        echo -e "${YELLOW}Step 2: Setting txqueuelen to 2500...${NC}"
+        local IF=$(get_interface)
+        if [[ -n "$IF" ]]; then
+            ip link set dev $IF txqueuelen 2500
+            echo -e "${GREEN}txqueuelen set to 2500 on $IF${NC}"
+            if ! grep -q "ip link set dev $IF txqueuelen" /etc/rc.local; then
+                sed -i '/exit 0/d' /etc/rc.local 2>/dev/null
+                echo "ip link set dev $IF txqueuelen 2500" >> /etc/rc.local
+                echo "exit 0" >> /etc/rc.local
+                chmod +x /etc/rc.local
+            fi
+        else
+            echo -e "${RED}Failed to detect network interface${NC}"
+        fi
+    }
+
+    step3() {
+        echo -e "${YELLOW}Step 3: Configuring irqbalance...${NC}"
+        apt-get install -y irqbalance
+        systemctl enable irqbalance
+        systemctl start irqbalance
+        echo -e "${GREEN}irqbalance configured and started${NC}"
+    }
+
+    step4() {
+        echo -e "${YELLOW}Step 4: Applying HTB qdisc configuration...${NC}"
+        local IF=$(get_interface)
+        if [[ -n "$IF" ]]; then
+            tc qdisc del dev $IF root 2>/dev/null
+            tc qdisc add dev $IF root handle 1: htb default 20
+            tc class add dev $IF parent 1: classid 1:1 htb rate 1gbit ceil 1gbit
+            tc class add dev $IF parent 1:1 classid 1:10 htb rate 200mbit ceil 1gbit prio 1
+            tc class add dev $IF parent 1:1 classid 1:20 htb rate 800mbit ceil 1gbit prio 2
+            tc qdisc add dev $IF parent 1:10 handle 10: fq_codel limit 1000
+            tc qdisc add dev $IF parent 1:20 handle 20: netem delay 15ms limit 10000
+            tc filter add dev $IF parent 1: protocol ip prio 1 u32 match ip dport 22 0xffff flowid 1:10
+            tc filter add dev $IF parent 1: protocol ip prio 1 u32 match ip sport 22 0xffff flowid 1:10
+            tc filter add dev $IF parent 1: protocol ip prio 2 u32 match ip protocol 1 0xff flowid 1:10
+            echo -e "${GREEN}HTB qdisc configuration applied${NC}"
+        else
+            echo -e "${RED}Failed to detect network interface${NC}"
+        fi
+    }
+
+    step5() {
+        echo -e "${YELLOW}Step 5: Applying Cake qdisc configuration...${NC}"
+        local IF=$(get_interface)
+        if [[ -n "$IF" ]]; then
+            tc qdisc del dev $IF root 2>/dev/null
+            tc qdisc add dev $IF root cake bandwidth 1Gbit besteffort ack-filter nat
+            echo -e "${GREEN}Cake qdisc configuration applied${NC}"
+        else
+            echo -e "${RED}Failed to detect network interface${NC}"
+        fi
+    }
+
+    step6() {
+        echo -e "${YELLOW}Step 6: Applying sysctl configuration...${NC}"
+        cat > /etc/sysctl.conf << 'EOF'
+# System Optimization Settings
+fs.file-max = 2097152
+fs.nr_open = 2097152
+fs.inotify.max_user_instances = 8192
+fs.inotify.max_user_watches = 524288
+vm.swappiness = 5
+vm.dirty_ratio = 15
+vm.dirty_background_ratio = 5
+vm.min_free_kbytes = 65536
+vm.vfs_cache_pressure = 50
+vm.overcommit_memory = 1
+
+# Network Core Settings
+net.core.somaxconn = 65535
+net.core.netdev_max_backlog = 65535
+net.core.dev_weight = 64
+net.core.default_qdisc = fq
+net.core.rmem_default = 262144
+net.core.wmem_default = 262144
+net.core.rmem_max = 8388608
+net.core.wmem_max = 8388608
+net.core.optmem_max = 65536
+
+# IPv4 Settings
+net.ipv4.ip_forward = 1
+net.ipv4.ip_local_port_range = 1024 65535
+
+# TCP Memory Settings
+net.ipv4.tcp_mem = 65536 131072 262144
+net.ipv4.udp_mem = 65536 131072 262144
+net.ipv4.tcp_rmem = 8192 262144 8388608
+net.ipv4.tcp_wmem = 8192 262144 8388608
+net.ipv4.udp_rmem_min = 8192
+net.ipv4.udp_wmem_min = 8192
+
+# TCP Optimization
+net.ipv4.tcp_congestion_control = cubic
+net.ipv4.tcp_timestamps = 0
+net.ipv4.tcp_notsent_lowat = 16384
+net.ipv4.tcp_no_metrics_save = 1
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_adv_win_scale = -2
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_base_mss = 1024
+net.ipv4.tcp_min_snd_mss = 536
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_dsack = 1
+net.ipv4.tcp_frto = 2
+net.ipv4.tcp_early_retrans = 1
+net.ipv4.tcp_recovery = 1
+net.ipv4.tcp_thin_linear_timeouts = 1
+net.ipv4.tcp_thin_dpio = 1
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_rfc1337 = 1
+net.ipv4.tcp_fin_timeout = 15
+
+# TCP Keepalive Settings
+net.ipv4.tcp_keepalive_time = 120
+net.ipv4.tcp_keepalive_probes = 4
+net.ipv4.tcp_keepalive_intvl = 15
+
+# TCP Backlog Settings
+net.ipv4.tcp_max_syn_backlog = 65535
+net.ipv4.tcp_max_tw_buckets = 262144
+net.ipv4.tcp_max_orphans = 32768
+
+# TCP Retry Settings
+net.ipv4.tcp_retries1 = 3
+net.ipv4.tcp_retries2 = 8
+net.ipv4.tcp_syn_retries = 3
+net.ipv4.tcp_synack_retries = 3
+net.ipv4.tcp_orphan_retries = 1
+net.ipv4.tcp_abort_on_overflow = 0
+
+# Security Settings
+net.ipv4.conf.all.rp_filter = 0
+net.ipv4.conf.default.rp_filter = 0
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.default.accept_source_route = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+net.ipv4.icmp_ignore_bogus_error_responses = 1
+EOF
+        sysctl -p
+        echo -e "${GREEN}sysctl configuration applied${NC}"
+    }
+
+    advanced_optimization() {
+        echo -e "${YELLOW}Applying advanced server optimization...${NC}"
+        cat >> /etc/sysctl.conf << 'EOF'
+
+# Advanced Optimization Settings
+net.ipv4.tcp_keepalive_time = 300
+net.ipv4.tcp_keepalive_intvl = 60
+net.ipv4.tcp_keepalive_probes = 10
+net.core.somaxconn = 65535
+net.ipv4.tcp_max_syn_backlog = 8192
+net.core.netdev_max_backlog = 5000
+net.ipv4.tcp_max_tw_buckets = 200000
+net.core.default_qdisc = fq_codel
+net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_low_latency = 1
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_ecn = 1
+net.ipv4.tcp_moderate_rcvbuf = 1
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_base_mss = 1024
+net.ipv4.tcp_rmem = 4096 87380 8388608
+net.ipv4.tcp_wmem = 4096 16384 8388608
+net.core.rmem_max = 33554432
+net.core.wmem_max = 33554432
+net.core.rmem_default = 33554432
+net.core.wmem_default = 33554432
+EOF
+        sysctl -p
+        echo -e "${GREEN}Advanced optimization applied${NC}"
+    }
+
+    change_dns() {
+        echo -e "${YELLOW}Changing DNS servers...${NC}"
+        echo "Select DNS provider:"
+        echo "1) Google DNS (8.8.8.8, 8.8.4.4)"
+        echo "2) Cloudflare DNS (1.1.1.1, 1.0.0.1)"
+        echo "3) OpenDNS (208.67.222.222, 208.67.220.220)"
+        echo "4) Custom DNS"
+        read -p "Choose option (1-4): " dns_choice
+        case $dns_choice in
+            1)
+                echo "nameserver 8.8.8.8" > /etc/resolv.conf
+                echo "nameserver 8.8.4.4" >> /etc/resolv.conf
+                ;;
+            2)
+                echo "nameserver 1.1.1.1" > /etc/resolv.conf
+                echo "nameserver 1.0.0.1" >> /etc/resolv.conf
+                ;;
+            3)
+                echo "nameserver 208.67.222.222" > /etc/resolv.conf
+                echo "nameserver 208.67.220.220" >> /etc/resolv.conf
+                ;;
+            4)
+                read -p "Enter primary DNS: " dns1
+                read -p "Enter secondary DNS: " dns2
+                echo "nameserver $dns1" > /etc/resolv.conf
+                echo "nameserver $dns2" >> /etc/resolv.conf
+                ;;
+            *)
+                echo -e "${RED}Invalid option${NC}"
+                return
+                ;;
+        esac
+        if [[ -f /etc/resolvconf/resolv.conf.d/head ]]; then
+            cat /etc/resolv.conf > /etc/resolvconf/resolv.conf.d/head
+            resolvconf -u
+        fi
+        echo -e "${GREEN}DNS changed successfully${NC}"
+    }
+
+    change_mtu() {
+        echo -e "${YELLOW}Changing MTU...${NC}"
+        local IF=$(get_interface)
+        if [[ -n "$IF" ]]; then
+            read -p "Enter MTU value (default: 1500): " mtu_value
+            mtu_value=${mtu_value:-1500}
+            ip link set dev $IF mtu $mtu_value
+            echo -e "${GREEN}MTU changed to $mtu_value on $IF${NC}"
+            if ! grep -q "ip link set dev $IF mtu" /etc/rc.local; then
+                sed -i '/exit 0/d' /etc/rc.local 2>/dev/null
+                echo "ip link set dev $IF mtu $mtu_value" >> /etc/rc.local
+                echo "exit 0" >> /etc/rc.local
+                chmod +x /etc/rc.local
+            fi
+        else
+            echo -e "${RED}Failed to detect network interface${NC}"
+        fi
+    }
+
+    uninstall_changes() {
+        echo -e "${YELLOW}Uninstalling all changes...${NC}"
+        restore_backups
+        local IF=$(get_interface)
+        if [[ -n "$IF" ]]; then
+            tc qdisc del dev $IF root 2>/dev/null
+            ethtool -K $IF tso on gso on gro on 2>/dev/null
+            ip link set dev $IF txqueuelen 1000
+        fi
+        if [[ -f /etc/rc.local ]]; then
+            > /etc/rc.local
+            echo "#!/bin/bash" > /etc/rc.local
+            echo "exit 0" >> /etc/rc.local
+        fi
+        systemctl stop irqbalance
+        systemctl disable irqbalance
+        echo -e "${GREEN}All changes uninstalled${NC}"
+        echo -e "${YELLOW}Reboot recommended for complete reset${NC}"
+    }
+
+    full_installation() {
+        echo -e "${BLUE}Starting full optimization installation...${NC}"
+        backup_files
+        install_prerequisites
+        step1
+        step2
+        step3
+        step4
+        step5
+        step6
+        advanced_optimization
+        echo -e "${GREEN}Full optimization completed successfully${NC}"
+    }
+
+    # Internal menu for CPU Optimizer
+    while true; do
+        clear
+        echo -e "${BLUE}================================${NC}"
+        echo -e "${GREEN}    CPU & Network Optimizer    ${NC}"
+        echo -e "${BLUE}================================${NC}"
+        echo -e "${YELLOW}Available options:${NC}"
+        echo -e "${GREEN}1)${NC} Full installation (all optimizations)"
+        echo -e "${GREEN}2)${NC} Uninstall all changes"
+        echo -e "${GREEN}3)${NC} Reboot server"
+        echo -e "${GREEN}4)${NC} Change DNS"
+        echo -e "${GREEN}5)${NC} Change MTU"
+        echo -e "${GREEN}6)${NC} Advanced optimization only"
+        echo -e "${GREEN}7)${NC} Exit to main menu"
+        echo -e "${BLUE}================================${NC}"
+        read -p "Choose an option (1-7): " choice
+        case $choice in
+            1) full_installation; read -p "Press Enter to continue..." ;;
+            2) uninstall_changes; read -p "Press Enter to continue..." ;;
+            3) echo -e "${YELLOW}Rebooting server...${NC}"; reboot ;;
+            4) change_dns; read -p "Press Enter to continue..." ;;
+            5) change_mtu; read -p "Press Enter to continue..." ;;
+            6) backup_files; advanced_optimization; read -p "Press Enter to continue..." ;;
+            7) echo -e "${GREEN}Returning to main menu...${NC}"; return 0 ;;
+            *) echo -e "${RED}Invalid option${NC}"; read -p "Press Enter to continue..." ;;
+        esac
+    done
+}
 
 reset_all() {
     if ! confirm_action "Reset ALL changes to default?"; then return; fi
@@ -998,7 +1332,7 @@ show_menu() {
         echo " 2) Configure MTU"
         echo " 3) Configure DNS"
         echo " 4) Firewall Management"
-        echo " 5) Manage ICMP Ping"
+        echo " 5) CPU Optimizer (Full server optimization)"
         echo " 6) Manage IPv6"
         echo " 7) Setup IPTable Tunnel"
         echo " 8) Ping MTU Size Test"
@@ -1008,29 +1342,27 @@ show_menu() {
         echo "12) Backup Configuration"
         echo "13) Restore Backup"
         echo "14) Check for Updates"
-        echo "15) TCP MUX Configuration (بهبود یافته)"
+        echo "15) TCP MUX Configuration (Enhanced)"
         echo "16) Reboot System"
         echo "17) Find Best MTU Size"
         echo "18) Setup Iran VXLAN Tunnel"
         echo "19) Setup Kharej VXLAN Tunnel"
         echo "20) Delete VXLAN Tunnel"
         echo "21) Install HAProxy & All Ports"
-        echo "22) Exit"
-        echo "23) Uninstall BBR and restore previous settings"
         echo "24) GitHub Fixer (add raw.githubusercontent.com)"
         echo "25) Uninstall HAProxy (complete removal)"
         echo "26) WhatsApp Timezone Fixer (set to Asia/Tehran)"
         echo "27) BBR + fq_codel (advanced settings)"
         echo "28) Nameserver Fixer (1.1.1.1 & 8.8.8.8)"
-        echo "29) IPv6 Disable (full)"
-        echo "30) System Lock Fixer (dpkg)"
+        echo "29) Uninstall BBR"
+        echo "30) Exit"
         read -p "Enter your choice [1-30]: " choice
         case $choice in
             1)  install_bbr ;;
             2)  echo -e "Current MTU: $CURRENT_MTU"; read -p "New MTU: " m; [[ "$m" =~ ^[0-9]+$ ]] && configure_mtu "$m" || echo "invalid" ;;
             3)  configure_dns ;;
             4)  manage_firewall ;;
-            5)  manage_icmp ;;
+            5)  cpu_optimizer ;;
             6)  manage_ipv6 ;;
             7)  manage_tunnel ;;
             8)  ping_mtu ;;
@@ -1047,15 +1379,13 @@ show_menu() {
             19) setup_kharej_tunnel ;;
             20) delete_vxlan_tunnel ;;
             21) install_haproxy_all_ports ;;
-            22) echo -e "${GREEN}Bye!${NC}"; exit 0 ;;
-            23) uninstall_bbr ;;
             24) github_fixer ;;
             25) uninstall_haproxy_full ;;
             26) timezone_fixer ;;
             27) bbr_fq_codel ;;
             28) nameserver_fixer ;;
-            29) ipv6_disable_full ;;
-            30) system_lock_fixer ;;
+            29) uninstall_bbr ;;
+            30) echo -e "${GREEN}Bye!${NC}"; exit 0 ;;
             *)  echo -e "${RED}Invalid option!${NC}" ;;
         esac
         read -p "Press [Enter] to continue..."
