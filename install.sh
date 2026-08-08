@@ -1376,7 +1376,8 @@ show_menu() {
         echo "28) Nameserver Fixer (1.1.1.1 & 8.8.8.8)"
         echo "29) Uninstall BBR"
         echo "30) Exit"
-        read -p "Enter your choice [1-30]: " choice
+        echo "31) IPv6 Fixer (disable IPv6 permanently)"
+        read -p "Enter your choice [1-31]: " choice
         case $choice in
             1)  install_bbr ;;
             2)  echo -e "Current MTU: $CURRENT_MTU"; read -p "New MTU: " m; [[ "$m" =~ ^[0-9]+$ ]] && configure_mtu "$m" || echo "invalid" ;;
@@ -1406,6 +1407,7 @@ show_menu() {
             28) nameserver_fixer ;;
             29) uninstall_bbr ;;
             30) echo -e "${GREEN}Bye!${NC}"; exit 0 ;;
+            31) ipv6_disable_full ;;
             *)  echo -e "${RED}Invalid option!${NC}" ;;
         esac
         read -p "Press [Enter] to continue..."
