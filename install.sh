@@ -34,6 +34,9 @@
 #  - NEW: Hetzner MTU fixer, Full DNS reset (systemd-resolved), SNI/CDN
 #         latency scanner, Full uninstall.
 #  - NEW: main status screen now re-reads MTU live instead of a cached value.
+#  - NEW: Enable IPv6 option (menu 36) - removes any disable_ipv6 lines from
+#         /etc/sysctl.conf, writes =0 for all/default, applies and reloads.
+#         Exit moved from 36 to 37.
 # =========================================================
 
 SCRIPT_NAME="Ultimate Network Optimizer"
@@ -1320,6 +1323,40 @@ net.ipv6.conf.lo.disable_ipv6 = 1"
     fi
 }
 
+# ========== NEW: Enable IPv6 ==========
+# Re-enables IPv6 and persists it in /etc/sysctl.conf:
+#  1) drops any existing net.ipv6.conf.(all|default).disable_ipv6 lines
+#  2) appends =0 for both
+#  3) applies them live with sysctl -w
+#  4) reloads everything with sysctl --system
+# Also removes the 90-netopt-ipv6-disable.conf drop-in (created by menu 28 /
+# Manage IPv6 -> Disable) so a leftover disable_ipv6=1 can't fight this.
+enable_ipv6() {
+    echo -e "${YELLOW}Enabling IPv6 (persisting in /etc/sysctl.conf)...${NC}"
+    print_separator
+
+    sysctl_unpersist "ipv6-disable"
+
+    touch /etc/sysctl.conf
+    if sed -i -E '/^[[:space:]]*net\.ipv6\.conf\.(all|default)\.disable_ipv6[[:space:]]*=/d' /etc/sysctl.conf && \
+       printf '\nnet.ipv6.conf.all.disable_ipv6=0\nnet.ipv6.conf.default.disable_ipv6=0\n' >> /etc/sysctl.conf && \
+       sysctl -w net.ipv6.conf.all.disable_ipv6=0 && \
+       sysctl -w net.ipv6.conf.default.disable_ipv6=0; then
+        sysctl --system >/dev/null 2>&1
+        local live
+        live=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)
+        if [[ "$live" == "0" ]]; then
+            echo -e "${GREEN}IPv6 enabled (net.ipv6.conf.all.disable_ipv6 = 0) and persisted.${NC}"
+            echo -e "${YELLOW}If no IPv6 address appears yet, restart networking or reboot to get one via SLAAC/DHCPv6.${NC}"
+        else
+            echo -e "${RED}Setting was written but the live value is still: $live${NC}"
+        fi
+    else
+        echo -e "${RED}Failed to enable IPv6 - see errors above.${NC}"
+        return 1
+    fi
+}
+
 system_lock_fixer() {
     echo -e "${YELLOW}Fixing dpkg locks...${NC}"
     rm -f /var/lib/dpkg/lock*
@@ -1868,8 +1905,9 @@ show_menu() {
         echo "33) Full DNS Reset (systemd-resolved restart+flush+status)"
         echo "34) SNI / CDN Latency Scanner"
         echo "35) FULL UNINSTALL (remove every change, restore original state)"
-        echo "36) Exit"
-        read -p "Enter your choice [1-36]: " choice
+        echo "36) Enable IPv6 (re-enable + persist in /etc/sysctl.conf)"
+        echo "37) Exit"
+        read -p "Enter your choice [1-37]: " choice
         case $choice in
             1)  install_bbr ;;
             2)  echo -e "Current MTU: $CURRENT_MTU"; read -p "New MTU: " m; [[ "$m" =~ ^[0-9]+$ ]] && configure_mtu "$m" || echo "invalid" ;;
@@ -1906,7 +1944,8 @@ show_menu() {
             33) reset_full_dns ;;
             34) sni_scanner ;;
             35) full_uninstall ;;
-            36) echo -e "${GREEN}Bye!${NC}"; exit 0 ;;
+            36) enable_ipv6 ;;
+            37) echo -e "${GREEN}Bye!${NC}"; exit 0 ;;
             *)  echo -e "${RED}Invalid option!${NC}" ;;
         esac
         read -p "Press [Enter] to continue..."
