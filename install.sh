@@ -37,10 +37,43 @@
 #  - NEW: Enable IPv6 option (menu 36) - removes any disable_ipv6 lines from
 #         /etc/sysctl.conf, writes =0 for all/default, applies and reloads.
 #         Exit moved from 36 to 37.
+#
+# Changelog vs 10.0:
+#  - FIX: nameserver_fixer() (menu "Nameserver Fixer") wrote straight to
+#         /etc/resolv.conf even when systemd-resolved owns it as a symlink,
+#         so the change looked applied but was silently reverted on the
+#         next resolved restart/reboot - same root cause configure_dns()/
+#         reset_dns() already handle, just missed in this one spot. Now
+#         routes through resolvectl when systemd-resolved is active, and
+#         keeps DNS_SERVERS/CURRENT_DNS/config in sync afterwards.
+#  - FIX: speed_test()'s download-speed test files (speedtest.ftp.otenet.gr,
+#         ipv4.download.thinkbroadband.com) are frequently dead now, so the
+#         test would hang or just print "Failed". Swapped for Hetzner/
+#         Cloudflare endpoints, added an explicit timeout, and a 0 B/s
+#         "success" (e.g. an error page) is now correctly treated as failed
+#         instead of reported as a real speed.
+#  - NEW: TCP Fast Open - idempotent /etc/sysctl.d/99-custom.conf entry
+#         (updates the existing line instead of duplicating it on re-runs)
+#         plus a live readback confirming tcp_fastopen is really at 3.
+#  - NEW: Reset DNS (Full) - flushes + restarts systemd-resolved AND
+#         NetworkManager when present, shows DNS status before/after, and
+#         degrades gracefully instead of hard-failing when
+#         systemd-resolved isn't installed.
+#  - NEW: Swap Manager - create/resize/remove a swap file, persisted via
+#         fstab, with its own swappiness/cache-pressure sysctl.d drop-in,
+#         to relieve RAM pressure (and the CPU thrashing/OOM-kills that
+#         come with it) on small VPS boxes.
+#  - NEW: Install Sub Template - fetches the 3x-ui gotham-batman sub page;
+#         now fails loudly on an HTTP error and refuses to overwrite an
+#         existing index.html with an empty/broken download.
+#  - NEW: Set MTU 1476 - persisted via an @reboot crontab entry, deduped so
+#         re-running the option doesn't stack duplicate cron lines, and
+#         resolves the full path to `ip` since cron's PATH is minimal.
+#         Menu renumbered 1-42, Exit moved from 37 to 42.
 # =========================================================
 
 SCRIPT_NAME="Ultimate Network Optimizer"
-SCRIPT_VERSION="10.0"
+SCRIPT_VERSION="10.1"
 AUTHOR="Parham Pahlevan"
 CONFIG_FILE="/etc/network_optimizer.conf"
 LOG_FILE="/var/log/network_optimizer.log"
@@ -283,12 +316,20 @@ speed_test() {
     fi
     echo -e "\n${BLUE}Testing Download Speed...${NC}"
     if command -v curl >/dev/null 2>&1; then
-        local urls=("http://speedtest.ftp.otenet.gr/files/test1Mb.db" "http://ipv4.download.thinkbroadband.com/1MB.zip")
+        # FIX (10.1): the old otenet.gr/thinkbroadband.com URLs are dead on
+        # most networks now and had no timeout, so this used to just hang
+        # or print "Failed" every time. Hetzner + Cloudflare are far more
+        # reliably up, and a bounded -m stops a dead host from blocking the
+        # whole speed test.
+        local urls=("https://speed.hetzner.de/100MB.bin" "https://speed.cloudflare.com/__down?bytes=25000000")
         for u in "${urls[@]}"; do
             echo -n "Testing $u: "
             local speed
-            speed=$(curl -o /dev/null -w "%{speed_download}" -s "$u" 2>/dev/null)
-            if [ -n "$speed" ]; then
+            speed=$(curl -o /dev/null -w "%{speed_download}" -s -m 10 "$u" 2>/dev/null)
+            # FIX (10.1): curl can succeed with 0 bytes transferred (e.g. a
+            # fast error/redirect page) - that used to be reported as "0
+            # Mbps success" instead of being treated as a failed test.
+            if [ -n "$speed" ] && awk "BEGIN{exit !($speed > 0)}" 2>/dev/null; then
                 local mbps
                 mbps=$(echo "scale=2; $speed / 125000" | bc 2>/dev/null || echo "0")
                 echo "${mbps} Mbps"
@@ -808,9 +849,12 @@ restore_backup() {
 
 self_update() {
     echo -e "${YELLOW}Local version: $SCRIPT_VERSION${NC}"
-    echo -e "${YELLOW}Changes: DNS/IPv6 bug fixes, idempotent sysctl.d persistence, UDP${NC}"
+    echo -e "${YELLOW}10.0: DNS/IPv6 bug fixes, idempotent sysctl.d persistence, UDP${NC}"
     echo -e "${YELLOW}optimizer, TCP noise fixer, Hetzner MTU fixer, full DNS reset, SNI${NC}"
-    echo -e "${YELLOW}scanner, full uninstall. See the header comment for the full list.${NC}"
+    echo -e "${YELLOW}scanner, full uninstall.${NC}"
+    echo -e "${YELLOW}10.1: nameserver_fixer()/speed_test() bug fixes, TCP Fast Open,${NC}"
+    echo -e "${YELLOW}Reset DNS (Full), Swap Manager, Install Sub Template, Set MTU 1476.${NC}"
+    echo -e "${YELLOW}See the header comment for the full changelog.${NC}"
 }
 
 manage_firewall() {
@@ -1302,10 +1346,29 @@ EOT
 
 nameserver_fixer() {
     echo -e "${YELLOW}Resetting DNS to 1.1.1.1 and 8.8.8.8...${NC}"
-    chattr -i /etc/resolv.conf 2>/dev/null || true
-    rm -f /etc/resolv.conf
-    echo -e "nameserver 1.1.1.1\nnameserver 8.8.8.8" > /etc/resolv.conf
-    echo -e "${GREEN}DNS reset.${NC}"
+    # FIX (10.1): this used to always rm+rewrite /etc/resolv.conf directly,
+    # even on systemd-resolved systems where that file is a symlink - the
+    # change looked applied but systemd-resolved silently regenerated it on
+    # its next restart/reboot. configure_dns()/reset_dns() already handle
+    # this correctly; this function was the one spot that didn't.
+    if _detect_systemd_resolved; then
+        echo -e "${YELLOW}systemd-resolved detected - using resolvectl instead of editing resolv.conf directly${NC}"
+        echo -e "${YELLOW}(resolv.conf is a symlink there; a direct write gets reverted on the next restart).${NC}"
+        if resolvectl dns "$NETWORK_INTERFACE" 1.1.1.1 8.8.8.8 && resolvectl domain "$NETWORK_INTERFACE" '~.'; then
+            echo -e "${GREEN}DNS reset via resolvectl.${NC}"
+        else
+            echo -e "${RED}resolvectl rejected the change.${NC}"
+            return 1
+        fi
+    else
+        chattr -i /etc/resolv.conf 2>/dev/null || true
+        rm -f /etc/resolv.conf
+        printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf
+        echo -e "${GREEN}DNS reset.${NC}"
+    fi
+    DNS_SERVERS=("1.1.1.1" "8.8.8.8")
+    CURRENT_DNS=$(grep nameserver /etc/resolv.conf 2>/dev/null | awk '{print $2}' | tr '\n' ' ')
+    save_config
 }
 
 # IPv6 Disable full: now a thin wrapper around the fixed _ipv6_apply, so it
@@ -1864,6 +1927,234 @@ full_uninstall() {
     echo -e "${GREEN}Full uninstall complete. A reboot is recommended to confirm a clean state.${NC}"
 }
 
+# ========== NEW (10.1): TCP Fast Open ==========
+# Persists net.ipv4.tcp_fastopen=3 in /etc/sysctl.d/99-custom.conf. Written
+# idempotently - updates the existing line in place instead of appending a
+# duplicate every re-run (what a plain "echo ... | tee -a" would do) -
+# applies it immediately, then reads the live kernel value back to confirm
+# mode 3 (client+server) is actually active, not just written to disk.
+tcp_fastopen_enable() {
+    echo -e "${YELLOW}Enabling TCP Fast Open (mode 3: client+server)...${NC}"
+    print_separator
+
+    local conf="/etc/sysctl.d/99-custom.conf"
+    mkdir -p "$(dirname "$conf")"
+    touch "$conf"
+
+    if grep -qE '^[[:space:]]*net\.ipv4\.tcp_fastopen[[:space:]]*=' "$conf"; then
+        sed -i -E 's/^[[:space:]]*net\.ipv4\.tcp_fastopen[[:space:]]*=.*/net.ipv4.tcp_fastopen = 3/' "$conf"
+    else
+        echo "net.ipv4.tcp_fastopen = 3" >> "$conf"
+    fi
+
+    if ! sysctl -p "$conf" >/dev/null 2>&1; then
+        echo -e "${RED}sysctl -p failed to apply $conf - check for syntax errors above.${NC}"
+    fi
+    sysctl -w net.ipv4.tcp_fastopen=3 >/dev/null 2>&1
+
+    local live
+    live=$(sysctl -n net.ipv4.tcp_fastopen 2>/dev/null)
+    if [[ "$live" == "3" ]]; then
+        echo -e "${GREEN}TCP Fast Open is active: net.ipv4.tcp_fastopen = 3${NC}"
+        echo -e "${GREEN}Persisted in $conf (survives reboot).${NC}"
+    else
+        echo -e "${RED}TCP Fast Open did NOT apply - kernel reports: ${live:-unknown}${NC}"
+        echo -e "${YELLOW}Some kernels/containers (e.g. OpenVZ) don't support TFO.${NC}"
+    fi
+}
+
+# ========== NEW (10.1): Reset DNS (Full flush + service restart) ==========
+# Distinct from "Full DNS Reset" (menu, systemd-resolved only, exits if
+# it's missing): this also restarts NetworkManager when present, prints
+# DNS status before/after, and degrades gracefully instead of aborting on
+# boxes without systemd-resolved.
+reset_dns_full() {
+    echo -e "${YELLOW}Full DNS reset (flush + restart services)...${NC}"
+    print_separator
+
+    echo -e "${BOLD}=== Current DNS (before) ===${NC}"
+    if command -v resolvectl >/dev/null 2>&1; then
+        resolvectl status 2>/dev/null || true
+    else
+        cat /etc/resolv.conf 2>/dev/null || echo "  (no /etc/resolv.conf)"
+    fi
+    print_separator
+
+    if _detect_systemd_resolved; then
+        echo -e "${YELLOW}Flushing systemd-resolved caches...${NC}"
+        resolvectl flush-caches 2>/dev/null || true
+        echo -e "${YELLOW}Restarting systemd-resolved...${NC}"
+        systemctl restart systemd-resolved
+    elif systemctl list-unit-files 2>/dev/null | grep -q systemd-resolved; then
+        echo -e "${YELLOW}systemd-resolved present but inactive - starting it...${NC}"
+        systemctl restart systemd-resolved 2>/dev/null || \
+            echo -e "${RED}Could not start systemd-resolved.${NC}"
+    else
+        echo -e "${YELLOW}systemd-resolved not present - restarting local caching resolvers instead (if any).${NC}"
+        systemctl restart nscd 2>/dev/null || true
+        systemctl restart dnsmasq 2>/dev/null || true
+    fi
+
+    if systemctl list-unit-files 2>/dev/null | grep -q NetworkManager; then
+        echo -e "${YELLOW}Restarting NetworkManager...${NC}"
+        systemctl restart NetworkManager 2>/dev/null || \
+            echo -e "${RED}NetworkManager restart failed (may not be active).${NC}"
+    fi
+
+    print_separator
+    echo -e "${BOLD}=== DNS status (after) ===${NC}"
+    if command -v resolvectl >/dev/null 2>&1; then
+        resolvectl status 2>/dev/null
+    else
+        cat /etc/resolv.conf 2>/dev/null
+    fi
+
+    CURRENT_DNS=$(grep nameserver /etc/resolv.conf 2>/dev/null | awk '{print $2}' | tr '\n' ' ')
+    save_config
+    echo -e "${GREEN}DNS reset complete.${NC}"
+}
+
+# ========== NEW (10.1): Swap Manager ==========
+# Creates/resizes/removes a swap file to relieve memory pressure on small
+# VPS boxes. Swap itself only frees RAM directly - the "frees up CPU too"
+# benefit is indirect: it's the thrashing/OOM-kills that happen when a
+# tunnel or build process runs out of memory with nothing to page out to
+# that actually burns CPU, and swap gives the kernel somewhere to put
+# cold pages instead of killing processes or stalling.
+manage_swap() {
+    echo -e "\n${YELLOW}Swap Manager${NC}"
+    print_separator
+    echo -e "${BOLD}Current memory/swap:${NC}"
+    free -h
+    print_separator
+    echo "1) Create/resize swap file"
+    echo "2) Remove swap file"
+    echo "3) Back"
+    read -p "Choice [1-3]: " sc
+    case $sc in
+        1)
+            read -p "Swap size in MB (default 2048): " sz
+            sz=${sz:-2048}
+            if [[ ! "$sz" =~ ^[0-9]+$ ]] || [ "$sz" -lt 64 ]; then
+                echo -e "${RED}Invalid size.${NC}"; return 1
+            fi
+            local swapfile="/swapfile"
+            if grep -q "^${swapfile}[[:space:]]" /proc/swaps 2>/dev/null; then
+                echo -e "${YELLOW}Disabling existing $swapfile to resize it...${NC}"
+                swapoff "$swapfile" 2>/dev/null
+            fi
+            rm -f "$swapfile" 2>/dev/null
+            echo -e "${YELLOW}Allocating ${sz}MB at $swapfile...${NC}"
+            if ! { command -v fallocate >/dev/null 2>&1 && fallocate -l "${sz}M" "$swapfile" 2>/dev/null; }; then
+                dd if=/dev/zero of="$swapfile" bs=1M count="$sz" status=progress
+            fi
+            chmod 600 "$swapfile"
+            if ! mkswap "$swapfile" >/dev/null; then
+                echo -e "${RED}mkswap failed.${NC}"; return 1
+            fi
+            if ! swapon "$swapfile"; then
+                echo -e "${RED}swapon failed.${NC}"; return 1
+            fi
+            if ! grep -qE "^[^#]*${swapfile}[[:space:]]" /etc/fstab 2>/dev/null; then
+                echo "$swapfile none swap sw 0 0" >> /etc/fstab
+            fi
+            sysctl_persist "swap" "vm.swappiness = 10
+vm.vfs_cache_pressure = 50"
+            echo -e "${GREEN}Swap enabled and persisted in /etc/fstab.${NC}"
+            free -h
+            ;;
+        2)
+            local swapfile="/swapfile"
+            if confirm_action "Remove swap file $swapfile?"; then
+                if grep -q "^${swapfile}[[:space:]]" /proc/swaps 2>/dev/null; then
+                    swapoff "$swapfile"
+                fi
+                sed -i "\|^${swapfile}[[:space:]]|d" /etc/fstab 2>/dev/null
+                rm -f "$swapfile"
+                sysctl_unpersist "swap"
+                echo -e "${GREEN}Swap file removed.${NC}"
+                free -h
+            else
+                echo -e "${YELLOW}Cancelled.${NC}"
+            fi
+            ;;
+    esac
+    read -p "Enter to continue..."
+}
+
+# ========== NEW (10.1): Install Sub Template (3x-ui gotham-batman) ==========
+install_sub_template() {
+    echo -e "${YELLOW}Installing 3x-ui sub template (gotham-batman)...${NC}"
+    print_separator
+    local dest="/etc/3x-ui/sub_templates/gotham-batman"
+    if ! mkdir -p "$dest"; then
+        echo -e "${RED}Could not create $dest${NC}"; return 1
+    fi
+    if ! cd "$dest"; then
+        echo -e "${RED}Could not cd into $dest${NC}"; return 1
+    fi
+
+    local url="https://raw.githubusercontent.com/parhampahlevann/sub/main/sub.html?t=$(date +%s)"
+    echo -e "${YELLOW}Downloading sub.html...${NC}"
+    # -f (10.1 fix): fail on HTTP errors instead of silently saving a 404/
+    # error page as if it were the real template.
+    if ! curl -fsSL -o sub.html "$url"; then
+        echo -e "${RED}Download failed - check connectivity/URL.${NC}"
+        return 1
+    fi
+    # (10.1 fix): refuse to clobber a working index.html with an empty file
+    # if the download somehow came back 0 bytes despite curl exiting 0.
+    if [ ! -s sub.html ]; then
+        echo -e "${RED}Downloaded file is empty - aborting without touching index.html.${NC}"
+        rm -f sub.html
+        return 1
+    fi
+    cp sub.html index.html
+    chmod 644 sub.html index.html
+    ls -la
+    echo -e "${GREEN}فایل‌ها دانلود شد! ($dest)${NC}"
+    if [ ! -d /etc/x-ui ] && [ ! -d /usr/local/x-ui ] && ! command -v x-ui >/dev/null 2>&1; then
+        echo -e "${YELLOW}Note: 3x-ui doesn't look installed on this system - template saved but unused until it is.${NC}"
+    fi
+}
+
+# ========== NEW (10.1): Set MTU 1476 (persist via @reboot cron) ==========
+# Mirrors hetzner_mtu_fixer()'s eth0-with-fallback pattern. Persists via an
+# @reboot crontab entry as requested rather than configure_mtu()'s netplan/
+# nmcli logic, deduped so re-running this doesn't stack duplicate @reboot
+# lines in root's crontab, and resolves ip's full path since cron runs
+# with a minimal PATH that may not include /sbin.
+set_mtu_1476() {
+    local target_if="eth0"
+    if ! ip link show "$target_if" >/dev/null 2>&1; then
+        echo -e "${YELLOW}No eth0 on this box, using the detected default interface: $NETWORK_INTERFACE${NC}"
+        target_if="$NETWORK_INTERFACE"
+    fi
+
+    echo -e "${YELLOW}Running: ip link set mtu 1476 dev $target_if${NC}"
+    if ip link set mtu 1476 dev "$target_if"; then
+        echo -e "${GREEN}MTU set to 1476 on $target_if.${NC}"
+    else
+        echo -e "${RED}Failed to set MTU on $target_if.${NC}"
+        return 1
+    fi
+
+    local ip_bin
+    ip_bin=$(command -v ip || echo /sbin/ip)
+    local cron_line="@reboot $ip_bin link set mtu 1476 dev $target_if"
+    if crontab -l 2>/dev/null | grep -qF "$cron_line"; then
+        echo -e "${YELLOW}Cron entry already present, not duplicating.${NC}"
+    else
+        (crontab -l 2>/dev/null; echo "$cron_line") | crontab -
+        echo -e "${GREEN}Persisted via @reboot crontab entry: $cron_line${NC}"
+    fi
+
+    if [[ "$target_if" == "$NETWORK_INTERFACE" ]]; then
+        CURRENT_MTU=1476
+        save_config
+    fi
+}
+
 show_menu() {
     load_config
     detect_distro
@@ -1906,8 +2197,13 @@ show_menu() {
         echo "34) SNI / CDN Latency Scanner"
         echo "35) FULL UNINSTALL (remove every change, restore original state)"
         echo "36) Enable IPv6 (re-enable + persist in /etc/sysctl.conf)"
-        echo "37) Exit"
-        read -p "Enter your choice [1-37]: " choice
+        echo "37) TCP Fast Open (enable mode 3, persisted)"
+        echo "38) Reset DNS (Full flush + restart, incl. NetworkManager)"
+        echo "39) Swap Manager (create/resize/remove swap)"
+        echo "40) Install Sub Template (3x-ui gotham-batman)"
+        echo "41) Set MTU 1476 (persist via @reboot cron)"
+        echo "42) Exit"
+        read -p "Enter your choice [1-42]: " choice
         case $choice in
             1)  install_bbr ;;
             2)  echo -e "Current MTU: $CURRENT_MTU"; read -p "New MTU: " m; [[ "$m" =~ ^[0-9]+$ ]] && configure_mtu "$m" || echo "invalid" ;;
@@ -1945,7 +2241,12 @@ show_menu() {
             34) sni_scanner ;;
             35) full_uninstall ;;
             36) enable_ipv6 ;;
-            37) echo -e "${GREEN}Bye!${NC}"; exit 0 ;;
+            37) tcp_fastopen_enable ;;
+            38) reset_dns_full ;;
+            39) manage_swap ;;
+            40) install_sub_template ;;
+            41) set_mtu_1476 ;;
+            42) echo -e "${GREEN}Bye!${NC}"; exit 0 ;;
             *)  echo -e "${RED}Invalid option!${NC}" ;;
         esac
         read -p "Press [Enter] to continue..."
